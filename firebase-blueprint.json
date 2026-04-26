@@ -1,0 +1,34 @@
+{
+  "entities": {
+    "LiveState": {
+      "title": "LiveState",
+      "description": "Trading bots execution state",
+      "type": "object",
+      "properties": {
+        "isActive": { "type": "boolean" },
+        "status": { "type": "string" },
+        "balance": { "type": "number" },
+        "regime": { "type": "string" },
+        "lastUpdate": { "type": "string" },
+        "lastError": { "type": "string" },
+        "openPositions": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "recentTrades": {
+          "type": "array",
+          "items": { "type": "object" }
+        }
+      },
+      "required": ["isActive", "status", "balance", "regime"]
+    }
+  },
+  "firestore": {
+    "/bot_state/{documentId}": {
+      "schema": {
+        "$ref": "#/entities/LiveState"
+      },
+      "description": "Stores the active trading bot state."
+    }
+  }
+}

@@ -1,0 +1,53 @@
+eslint.config.js:1 - default
+vite.config.ts:6 - default
+src/App.tsx:8 - default
+components/ui/alert.tsx:76 - AlertAction (used in module)
+components/ui/badge.tsx:52 - badgeVariants (used in module)
+components/ui/button.tsx:58 - Button (used in module)
+components/ui/button.tsx:58 - buttonVariants (used in module)
+components/ui/card.tsx:98 - CardFooter (used in module)
+components/ui/card.tsx:100 - CardAction (used in module)
+components/ui/scroll-area.tsx:53 - ScrollBar (used in module)
+components/ui/table.tsx:106 - Table (used in module)
+components/ui/table.tsx:107 - TableHeader (used in module)
+components/ui/table.tsx:108 - TableBody (used in module)
+components/ui/table.tsx:109 - TableFooter (used in module)
+components/ui/table.tsx:110 - TableHead (used in module)
+components/ui/table.tsx:111 - TableRow (used in module)
+components/ui/table.tsx:112 - TableCell (used in module)
+components/ui/table.tsx:113 - TableCaption (used in module)
+components/ui/tabs.tsx:82 - Tabs (used in module)
+components/ui/tabs.tsx:82 - TabsList (used in module)
+components/ui/tabs.tsx:82 - TabsTrigger (used in module)
+components/ui/tabs.tsx:82 - TabsContent (used in module)
+components/ui/tabs.tsx:82 - tabsListVariants (used in module)
+src/lib/metricsCalculator.ts:1 - LiveState (used in module)
+src/lib/ml.ts:12 - generateSyntheticOHLCV
+src/lib/ml.ts:43 - extractFeatures
+src/lib/ml.ts:3 - OHLCV (used in module)
+src/lib/ml.ts:86 - SGDClassifier
+src/server/liveEngine.ts:150 - initExchange (used in module)
+src/server/liveEngine.ts:34 - LiveState (used in module)
+src/server/backtest/reportAggregator.ts:1 - TradeLog (used in module)
+src/server/backtest/reportAggregator.ts:24 - MetricGroup (used in module)
+src/server/core/architecture.ts:218 - generateExtremeSignals (used in module)
+src/server/core/architecture.ts:238 - generateNormalMarketSignals (used in module)
+src/server/core/architecture.ts:17 - SignalDirection (used in module)
+src/server/core/architecture.ts:18 - ExitReason (used in module)
+src/server/core/architecture.ts:48 - MathUtils (used in module)
+src/server/core/architecture.ts:205 - SignalContext (used in module)
+src/server/core/architecture.ts:211 - SignalCandidate (used in module)
+src/server/core/architecture.ts:377 - ExpectancyPermission (used in module)
+src/server/core/architecture.ts:384 - SetupMetrics (used in module)
+src/server/core/architecture.ts:398 - SetupExpectancyMatrix (used in module)
+src/server/core/interfaces.ts:3 - SystemState
+src/server/core/interfaces.ts:18 - MarketRegime (used in module)
+src/server/core/interfaces.ts:25 - OrderIntent (used in module)
+src/server/core/interfaces.ts:34 - BinanceTradeEvent
+src/server/core/interfaces.ts:42 - KLineData
+src/server/core/interfaces.ts:55 - RegimeOutput
+src/server/core/interfaces.ts:63 - FilterOutput
+src/server/core/interfaces.ts:69 - TriggerSignal
+src/server/core/interfaces.ts:78 - RiskEvaluation
+src/server/core/interfaces.ts:88 - OrderLifecycle (used in module)
+src/server/core/interfaces.ts:98 - StatefulOrder

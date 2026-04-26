@@ -1,0 +1,19 @@
+**DEAD CODE / INCOERENZE REPORT**
+
+1. **Dead Code (src/server/core/architecture.ts)**
+- In `SignalLayer.evaluate`, il vecchio blocco "Trend Continuation setup - DISABLED by Omega to stop buying local tops" è commentato ma non rimosso. Consigliato: cancellare le righe 153-156 per pulizia del codebase.
+- In `PositionExitLayer.monitorAndExit`, il calcolo base del trailing stop (`dynamicTrailingPct`) è mascherato dal flag `FEATURE_FLAGS.DYNAMIC_SL`. Sebbene non strettamente dead code, logica molto annidata.
+
+2. **Incoerenza tra configurazione e dati elaborati**
+- In `run.ts` alla riga 12, `SYMBOLS` include `'ADA/USD'` e altri 7 simboli, tuttavia alcuni backtest (es. `XRP/USD`, `SOL/USD`) hanno mostrato data gap considerevoli ("SOL/USD has a gap > 24h (62.0h)"). La "DATA GAP VALIDATION" segna i trade che partono su tick con data gap maggiore di 1 ora come `isContaminated`. Pur essendoci la flag, questi trade vengono calcolati e la metrica di `cleanPnL` contro `netPnL` devia molto a causa di questi edge case.
+- In `run.ts`, il PnL fluttuante (`floatingPnL`) globale è aggiornato con un "crossAssetTick" che assume che l'ultimo tick memorizzato sia valido. Se un asset ha gap lunghi (es. in weekend o blocco trading pair), l'equity calcolata `globalEquity + floatingPnL` subisce una valutazione non coerente col reale mark-to-market.
+
+3. **Logica di "Dead" Trade non aggiornata:**
+- È presente un commento `// If trade hasn't worked out in 48 hours (48 bars), edge is dead.` dentro `PositionExitLayer.monitorAndExit`. Viene forzata una uscita `TIME_STOP`. Tuttavia, le barre sono orarie per la valutazione dei segnali, ma l'avanzamento dei tick (ciclo tick `run.ts`) è a step di 15m. L'Exit layer conta `position.barsHeld++` ogni H1 close (45 minuti dell'ora). Quindi 48 bars equivalgono a 48 ore. L'implementazione collima col commento (bar = h1Close), quindi non è incoerente, tuttavia è una hard-coded magic number senza configurazione globale.
+
+4. **Variabile `isLastTick` in run.ts:**
+Nel ciclo for in `run.ts` per l'iterazione sulle barre c'è `const isLastTick = i === symbolStates[symbol].length - 1;`
+In alcuni casi array sfasati in length portano alcuni symbolStates a chiudersi prima ma `isLastTick` non viene valutato se `i > symbolStates[symbol].length` poiché il ciclo su symbol prosegue fino a `maxTicks`. Esiste un rischio che per simboli terminati in anticipo le posizioni aperte rimangano orfane e non forzate all'uscita (tranne se la fee calculation le raggiunge).
+
+**SINTESI**
+Nessun intervento tecnico grave da apportare oltre all'eliminazione delle righe commentate di setup preesistenti o fixare il mark-to-market dei simboli non aventi tick correnti. Le nuove metriche sono introdotte esclusivamente nella classe generatrice senza impatto sul PnL.

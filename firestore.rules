@@ -1,0 +1,39 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Primitive Helpers
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    
+    function isServerBot() {
+      // The update might not always change `botSecret` but it has to be present.
+      // incoming() evaluates the resulting state after update.
+      return incoming().botSecret == 'arbiter-secret-key-1092';
+    }
+
+    function isValidLiveState(data) {
+      return data.keys().hasAll(['isActive', 'status', 'balance', 'regime', 'botSecret', 'lastUpdate'])
+          && data.isActive is bool
+          && data.status is string 
+          && data.balance is number
+          && data.regime is string 
+          && data.botSecret is string 
+          && data.lastUpdate is string;
+    }
+
+    // bot_state is the core collection for the live engine state
+    match /bot_state/{docId} {
+      allow read: if true; // Dashboard must read
+      allow create: if isValidId(docId) && isServerBot() && isValidLiveState(incoming());
+      // During update, the botSecret must match to allow modification.
+      // Only the bot has the botSecret.
+      allow update: if isValidId(docId) && isServerBot() && isValidLiveState(incoming());
+    }
+  }
+}

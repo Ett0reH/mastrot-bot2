@@ -1,0 +1,17 @@
+# DEAD CODE REPORT - FASE 11
+
+## Analysis of Redundant Code
+Following the implementation of Fase 11 (Trade Budget Per Candle & Correlation Ranker), a review for dead code was conducted.
+
+1. **`src/server/backtest/run.ts` Position Loop Refactoring**:
+   - The primary loop evaluating `SYMBOLS` continuously using iterations per tick `i` was split into two separate passes internally: one for evaluating exits (`PositionExitLayer`) and one for aggregating and ranking candidate signals before allowing them into the risk tier (Fase 11).
+   - This required refactoring the `continue` statement inside the `h1Closed` exit logic since entries are now batched synchronously per cross-asset candle rather than sequentially. The old isolated evaluation logic is completely replaced and considered retired.
+
+2. **`TradeBudgetMetrics` object**:
+   - The metric object cleanly scales tracking of skipped signals and executed signals without interfering with core loop functionality. Existing loggers (e.g. AnalyticsLayer) handle `SKIPPED` routing organically, meaning no arbitrary unused logic was left over.
+
+## Conclusion
+The update required structural adjustments to cross-asset aggregation but introduced no orphaned functions, unused parameters, or shadowed variables. The existing `GatekeeperLayer` cleanly hands off valid `SignalCandidate` payloads down to the Phase 11 aggregator.
+
+**Overall Dead Code Removed**: 0 lines (refactored execution pipeline).
+**Overall Dead Code Introduced**: 0 lines.

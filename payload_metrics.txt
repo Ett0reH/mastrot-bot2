@@ -1,0 +1,211 @@
+              <motion.div 
+                 key="metrics"
+                 initial={{ opacity: 0, scale: 0.98 }}
+                 animate={{ opacity: 1, scale: 1 }}
+                 exit={{ opacity: 0, scale: 0.98 }}
+                 transition={{ duration: 0.3 }}
+                 className="flex flex-col w-full max-w-[1400px] mx-auto gap-4 pb-10"
+              >
+                {/* Header Section */}
+                <div className="flex flex-col md:flex-row items-start md:items-end justify-between pb-2 gap-4">
+                  <div className="flex flex-col">
+                    <h2 className="font-sans font-bold text-[22px] tracking-wide text-[#93C5FD] mb-1 uppercase drop-shadow-md">Quantitative Strategy Analysis</h2>
+                    <p className="font-sans text-[10px] tracking-widest text-white/30 uppercase">Instance: ARB_K_OMEGA_9 | Last Update: 14:02:11 UTC</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button 
+                      onClick={() => {
+                        if (!metrics) return;
+                        const output = JSON.stringify(metrics, null, 2);
+                        const blob = new Blob([output], { type: 'text/plain' });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `arbiter_metrics_${new Date().toISOString().slice(0, 10)}.txt`;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                      }}
+                      className="px-4 py-2 flex items-center gap-2 rounded border border-white/10 text-white/80 hover:bg-white/5 hover:text-white text-[11px] font-bold tracking-widest uppercase transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Export Metrics (CSV)
+                    </button>
+                    <button className="px-4 py-2 flex items-center gap-2 rounded border border-white/10 text-white/80 hover:bg-white/5 hover:text-white text-[11px] font-bold tracking-widest uppercase transition-colors">
+                      <FileText className="w-3.5 h-3.5" />
+                      PDF
+                    </button>
+                  </div>
+                </div>
+
+                {/* Metrics Group style */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {(() => {
+                  const groups = [
+                    {
+                      title: '01 // PURE RETURN',
+                      icon: <TrendingUp className="w-3.5 h-3.5 text-[#10B981]" />,
+                      items: [
+                        { label: 'Total Return', key: 'totalReturn', fmt: (v: number) => `${(v * 100).toFixed(2)}%`, polarity: true },
+                        { label: 'CAGR', key: 'cagr', fmt: (v: number) => `${(v * 100).toFixed(2)}%`, polarity: true },
+                        { label: 'Net Profit', key: 'netProfit', fmt: (v: number) => `$${v.toFixed(2)}`, polarity: true, defaultColor: 'text-[#93C5FD]' },
+                        { label: 'Avg Trade', key: 'avgTrade', fmt: (v: number) => `$${v.toFixed(2)}`, polarity: true, defaultColor: 'text-[#93C5FD]' },
+                      ]
+                    },
+                    {
+                      title: '02 // RISK-ADJUSTED RETURN',
+                      icon: <Shield className="w-3.5 h-3.5 text-[#F43F5E]" />,
+                      items: [
+                        { label: 'Max Drawdown', key: 'maxDD', fmt: (v: number) => `${(v * 100).toFixed(2)}%`, polarity: false },
+                        { label: 'Sharpe Ratio', key: 'sharpe', fmt: (v: number) => v.toFixed(2), polarity: true },
+                        { label: 'Sortino Ratio', key: 'sortino', fmt: (v: number) => v.toFixed(2), polarity: true },
+                        { label: 'Calmar Ratio', key: 'calmar', fmt: (v: number) => v.toFixed(1), polarity: true, defaultColor: 'text-[#93C5FD]' },
+                        { label: 'Ulcer Index', key: 'ulcerIndex', fmt: (v: number) => v.toFixed(3), polarity: false, defaultColor: 'text-white/40' },
+                      ]
+                    },
+                    {
+                      title: '03 // OPERATIONAL QUALITY',
+                      icon: <Sliders className="w-3.5 h-3.5 text-white/50" />,
+                      items: [
+                        { label: 'Profit Factor', key: 'profitFactor', fmt: (v: number) => v.toFixed(2), polarity: true, defaultColor: 'text-[#10B981]' },
+                        { label: 'Hit Rate', key: 'hitRate', fmt: (v: number) => `${(v * 100).toFixed(1)}%`, polarity: false, defaultColor: 'text-[#10B981]' },
+                        { label: 'Expectancy', key: 'expectancy', fmt: (v: number) => v.toFixed(2), polarity: true, defaultColor: 'text-[#93C5FD]' },
+                        { label: 'Avg Win/Loss', key: 'winLossRatio', fmt: (v: number) => `${v.toFixed(1)}:1`, polarity: true },
+                      ]
+                    },
+                    {
+                      title: '04 // RETURN ROBUSTNESS',
+                      icon: <GitBranch className="w-3.5 h-3.5 text-[#10B981]" />,
+                      items: [
+                        { label: 'Recovery Factor', key: 'recoveryFactor', fmt: (v: number) => v.toFixed(2), polarity: true, defaultColor: 'text-[#10B981]' },
+                        { label: 'Time Under Water', key: 'timeUnderWater', fmt: (v: number) => `${Math.floor(v/60)}h ${v%60}m`, polarity: false, defaultColor: 'text-white/70' },
+                        { label: 'Max DD Duration', key: 'maxDDDuration', fmt: (v: number) => `${Math.floor(v/60)}m ${(v%60).toFixed(0).padStart(2,'0')}s`, polarity: false, defaultColor: 'text-[#F43F5E]' },
+                        { label: 'Stability by regime', key: 'stabilityByRegime', fmt: (v: string) => v, polarity: false, defaultColor: 'text-[#93C5FD]' },
+                        { label: 'Out-of-sample perf.', key: 'oosPerformance', fmt: (v: string) => v, polarity: false, defaultColor: 'text-[#10B981]' },
+                      ]
+                    }
+                  ];
+
+                  return groups.map((group, groupIdx) => (
+                    <div key={groupIdx} className="bg-[#1A1C22]/80 border border-white/10 rounded-md overflow-hidden flex flex-col backdrop-blur-md">
+                      <div className="px-5 py-3.5 border-b border-white/5 text-[11px] font-bold tracking-widest text-[#93C5FD] uppercase font-sans flex items-center justify-between">
+                        <span>{group.title}</span>
+                        {group.icon}
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left font-sans whitespace-nowrap">
+                          <thead className="text-white/30 text-[10px] font-bold uppercase tracking-widest border-b border-white/5">
+                            <tr>
+                              <th className="px-5 py-3 font-normal">Metric</th>
+                              <th className="px-5 py-3 font-normal text-right">Current (T0)</th>
+                              <th className="px-5 py-3 font-normal text-right">Prev (T-15m)</th>
+                              <th className="px-5 py-3 font-normal text-right">24h (T-24h)</th>
+                            </tr>
+                          </thead>
+                          <tbody className="text-[12px] font-mono">
+                            {group.items.map((item: any, i: number) => {
+                              const v0 = (metrics?.t0 as any)?.[item.key] ?? '-';
+                              const v1 = (metrics?.t1 as any)?.[item.key] ?? '-';
+                              const v24 = (metrics?.t24h as any)?.[item.key] ?? '-';
+                              
+                              const renderVal = (v: any) => {
+                                if (v === '-') return <span className="text-white/20">-</span>;
+                                if (typeof v === 'string') return <span className="text-white/80">{item.fmt(v)}</span>;
+                                
+                                let colorClass = 'text-white/80';
+                                if (item.defaultColor) {
+                                  colorClass = item.defaultColor;
+                                } else {
+                                  if (item.polarity) {
+                                    colorClass = v > 0 ? 'text-[#10B981]' : v < 0 ? 'text-[#F43F5E]' : 'text-white/50';
+                                  } else {
+                                    colorClass = v > 0 ? 'text-[#F43F5E]' : v < 0 ? 'text-[#10B981]' : 'text-white/50';
+                                  }
+                                }
+                                return <span className={`font-semibold ${colorClass}`}>{item.fmt(v)}</span>;
+                              };
+
+                              return (
+                                <tr key={i} className="hover:bg-white/[0.02]">
+                                  <td className="px-5 py-3 text-white/90 font-sans font-medium">{item.label}</td>
+                                  <td className="px-5 py-3 text-right font-medium">{renderVal(v0)}</td>
+                                  <td className="px-5 py-3 text-right font-medium">{renderVal(v1)}</td>
+                                  <td className="px-5 py-3 text-right font-medium">{renderVal(v24)}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ));
+                })()}
+                </div>
+
+                {/* Bottom Section */}
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 h-full min-h-[240px]">
+                  {/* Chart Map */}
+                  <div className="lg:col-span-2 bg-[#1A1C22]/80 border border-white/10 rounded-md flex flex-col backdrop-blur-md p-5 relative overflow-hidden">
+                    <div className="flex justify-between items-start z-10 w-full">
+                      <span className="text-[9px] text-white/50 uppercase tracking-widest font-sans font-bold">Regime Stability Map</span>
+                      <div className="flex gap-1.5">
+                         <span className="w-1.5 h-1.5 rounded-full bg-[#10B981]"></span>
+                         <span className="w-1.5 h-1.5 rounded-full bg-white/20"></span>
+                         <span className="w-1.5 h-1.5 rounded-full bg-white/20"></span>
+                      </div>
+                    </div>
+                    
+                    <div className="flex-1 w-full mt-2 z-10 h-full min-h-[140px] relative">
+                      <ResponsiveContainer width="100%" height="100%" className="-ml-3 mt-4">
+                         <AreaChart data={chartData.length ? chartData : [{timestamp: 1, equity: 100}, {timestamp: 2, equity: 105}, {timestamp: 3, equity: 102}, {timestamp: 4, equity: 110}]} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
+                           <defs>
+                             <linearGradient id="regimeEq" x1="0" y1="0" x2="0" y2="1">
+                               <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.15}/>
+                               <stop offset="95%" stopColor="#3B82F6" stopOpacity={0.01}/>
+                             </linearGradient>
+                           </defs>
+                           <Area type="monotone" dataKey="equity" stroke="#3B82F6" strokeWidth={1.5} fillOpacity={1} fill="url(#regimeEq)" />
+                           {/* Add a second dummy line to replicate the design with two curves */}
+                           <Area type="monotone" dataKey={(d) => d.equity * 0.9997} stroke="#10B981" strokeWidth={1} fillOpacity={0} strokeOpacity={0.5} />
+                         </AreaChart>
+                      </ResponsiveContainer>
+                    </div>
+
+                    <div className="flex justify-between items-end z-10 pt-2 w-full">
+                      <span className="text-[8px] font-mono tracking-widest text-white/40">LATENCY_BASE: 0.4MS</span>
+                      <span className="text-[8px] font-mono tracking-widest text-white/40">TICKS_PROCESSED: 4,129,082</span>
+                      <span className="text-[8px] font-mono tracking-widest text-white/40">ENGINE_LOAD: 14.2%</span>
+                    </div>
+                  </div>
+
+                  {/* Status Box */}
+                  <div className="bg-[#1A1C22]/80 border border-white/10 rounded-md flex flex-col justify-between backdrop-blur-md p-6">
+                    <div className="flex flex-col items-center justify-center pt-2">
+                       <span className="text-[10px] text-white/30 uppercase tracking-widest font-sans font-bold mb-2">Current Status</span>
+                       <span className="text-3xl font-bold font-sans tracking-tight text-[#10B981] drop-shadow-[0_0_15px_rgba(16,185,129,0.3)]">OPERATIONAL</span>
+                    </div>
+
+                    <div className="flex flex-col gap-3 mt-8 w-full text-[10px] font-sans border-t border-white/5 pt-6">
+                      <div className="flex justify-between items-center w-full">
+                         <span className="text-white/40 tracking-widest uppercase font-bold">Uptime</span>
+                         <span className="text-white/90 font-mono text-[11px] font-medium">14d 02h 11m</span>
+                      </div>
+                      <div className="flex justify-between items-center w-full">
+                         <span className="text-white/40 tracking-widest uppercase font-bold">Signal Strength</span>
+                         <span className="text-[#10B981] font-mono text-[11px] font-medium">98.4%</span>
+                      </div>
+                      <div className="flex justify-between items-center w-full">
+                         <span className="text-white/40 tracking-widest uppercase font-bold">Risk Cap</span>
+                         <span className="text-white/90 font-mono text-[11px] font-medium">$12,000.00</span>
+                      </div>
+                    </div>
+
+                    <button className="w-full bg-[#B91C1C] hover:bg-[#991B1B] text-white rounded font-bold text-[10px] tracking-widest uppercase py-3.5 mt-6 transition-colors border border-[#B91C1C] shadow-[0_0_15px_rgba(185,28,28,0.2)]">
+                      Emergency Kill Switch
+                    </button>
+                  </div>
+
+                </div>
+
+              </motion.div>

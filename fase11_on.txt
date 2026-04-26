@@ -1,0 +1,70 @@
+--- MULTI-YEAR SIMULATION ARCHITECTURE V2 (MAX PERIOD) ---
+Loading Setup Expectancy Matrix...
+Loaded 35 setup logic constraints.
+Precomputing OHLCV...
+Cache fully covers up to target end date for BTC/USD.
+Precomputed 131081 states for BTC/USD
+Cache fully covers up to target end date for ETH/USD.
+Precomputed 131083 states for ETH/USD
+Cache fully covers up to target end date for SOL/USD.
+Precomputed 90712 states for SOL/USD
+Cache fully covers up to target end date for LTC/USD.
+Precomputed 130394 states for LTC/USD
+Cache fully covers up to target end date for XRP/USD.
+Precomputed 24056 states for XRP/USD
+Cache fully covers up to target end date for DOGE/USD.
+Precomputed 130838 states for DOGE/USD
+Cache fully covers up to target end date for LINK/USD.
+Precomputed 130763 states for LINK/USD
+Downloading ADA/USD [15Min] from 2021-01-01T00:00:00Z to 2024-10-31T23:59:59Z...
+
+==============================================
+====== NEW ARCHITECTURE BACKTEST ===================
+==============================================
+End Equity: $32107.56 (Initial: $10000.00)
+Total System PnL: $22107.56
+
+--- CHOP REGIME STATS ---
+CHOP Detected Candles: 21085
+Trades Blocked by CHOP: 5364
+CHOP Base Entries Executed: 0
+Theoretical / Actual PnL in CHOP: $0.00
+Clean PnL: $7788.85
+Contaminated PnL: $14318.71
+Valid Trades: 5237 | Contaminated Trades: 23
+Symbols w/ Gaps: XRP/USD, DOGE/USD, LTC/USD, LINK/USD, SOL/USD, ETH/USD, BTC/USD
+Total Trades Executed: 5260
+Win Rate: 40.9%
+
+--- ENGINE STATS ---
+EXTREME Engine: 254 trades | PnL: $8141.13 | PF: 1.41 | WR: 45.7%
+NORMAL Engine:  5006 trades | PnL: $13966.43 | PF: 1.45 | WR: 40.7%
+
+--- BREAKOUT RETEST (FASE 7) STATS ---
+Candidates: 11038
+Confirmed:  3721
+Blocked:    7317
+Reasons:     {
+  'RSI ipercomprato sul retest': 1524,
+  'BTC non conferma (Recupero)': 453,
+  'Volatilità esplosiva contro posizione': 3416,
+  'RSI ipervenduto sul retest': 1347,
+  'Prezzo sotto SMA50': 41,
+  'BTC non conferma (Breakdown)': 491,
+  'Prezzo sopra SMA50': 45
+}
+
+--- PROGRESSIVE EDGE DECAY (FASE 9) STATS ---
+Trades Closed by EDGE_DECAY_EARLY: 2025
+Classical EDGE_DECAY (48 bars): 116
+PnL 'Saved' from negative delayed exits: $3243.96
+Positive PnL cut short (Premature exits): $9467.68 (on 1227 trades)
+
+--- TRADE BUDGET & CORRELATION (FASE 11) STATS ---
+Total Valid Signals Generated: 5280
+Executed Signals: 5260
+Skipped Signals (Budget Exceeded): 20
+New Positions Per Candle Distribution:
+  [1 positions]: 4742 candles
+  [2 positions]: 259 candles
+Generated backtest_report_fase5.json
