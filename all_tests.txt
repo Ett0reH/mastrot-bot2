@@ -1,0 +1,272 @@
+Running... -> A.json
+--- MULTI-YEAR SIMULATION ARCHITECTURE V2 (MAX PERIOD) ---
+Loading Setup Expectancy Matrix...
+Loaded 29 setup logic constraints.
+Precomputing OHLCV...
+Cache fully covers up to target end date for BTC/USD.
+Precomputed 182194 states for BTC/USD
+Cache fully covers up to target end date for ETH/USD.
+Precomputed 182278 states for ETH/USD
+Cache fully covers up to target end date for SOL/USD.
+Precomputed 141886 states for SOL/USD
+Cache fully covers up to target end date for LTC/USD.
+Precomputed 181589 states for LTC/USD
+Cache fully covers up to target end date for XRP/USD.
+Precomputed 75028 states for XRP/USD
+Cache fully covers up to target end date for DOGE/USD.
+Precomputed 182021 states for DOGE/USD
+Cache fully covers up to target end date for LINK/USD.
+Precomputed 181925 states for LINK/USD
+Cache fully covers up to target end date for ADA/USD.
+Precomputed 2962 states for ADA/USD
+
+==============================================
+====== NEW ARCHITECTURE BACKTEST ===================
+==============================================
+End Equity (Gross): $26261.29 (Initial: $10000.00)
+Total System PnL (Gross): $16261.29
+End Equity (Clean-only): $25560.37
+Clean PnL: $15560.37
+Contaminated PnL: $700.92
+
+--- RISK TIER BREAKDOWN ---
+PnL senza Top 5 winners: $4758.95
+PnL senza Top 10 winners: $-1781.22
+[EXTREME_10] Trades: 521 | Clean PnL: $15560.37 | Clean PF: 1.31
+[EXTREME_FALLBACK_5] Trades: 0 | Clean PnL: $0.00 | Clean PF: 0.00
+[NORMAL_5] Trades: 0 | Clean PnL: $0.00 | Clean PF: 0.00
+[NORMAL_UPGRADED] Trades: 0 | Clean PnL: $0.00 | Clean PF: 0.00
+[TRANSITION_BLOCKED] Trades: 0 | Clean PnL: $0.00 | Clean PF: 0.00
+
+--- CHOP REGIME STATS ---
+CHOP Detected Candles: 44780
+Trades Blocked by CHOP: 0
+CHOP Base Entries Executed: 0
+Theoretical / Actual PnL in CHOP: $0.00
+Clean PnL: $15560.37
+Contaminated PnL: $700.92
+Valid Trades: 521 | Contaminated Trades: 4
+Symbols w/ Gaps: DOGE/USD, XRP/USD, LINK/USD
+Total Trades Executed: 525
+Win Rate: 44.2%
+
+--- ENGINE STATS ---
+EXTREME Engine: 525 trades | PnL: $16261.29 | PF: 1.33 | WR: 44.2%
+NORMAL Engine:  0 trades | PnL: $0.00 | PF: N/A | WR: 0%
+
+--- BREAKOUT RETEST (FASE 7) STATS ---
+Candidates: 0
+Confirmed:  0
+Blocked:    0
+Reasons:     {}
+
+--- PROGRESSIVE EDGE DECAY (FASE 9) STATS ---
+Trades Closed by EDGE_DECAY_EARLY: 79 (Normal: 0, Extreme: 79)
+Classical EDGE_DECAY (48 bars): 2
+PnL 'Saved' from negative delayed exits: $216.43
+Positive PnL cut short (Premature exits): $20949.25 (on 70 trades)
+Generated backtest_report_latest.json
+Running... -> B.json
+--- MULTI-YEAR SIMULATION ARCHITECTURE V2 (MAX PERIOD) ---
+Loading Setup Expectancy Matrix...
+Loaded 29 setup logic constraints.
+Precomputing OHLCV...
+Cache fully covers up to target end date for BTC/USD.
+Precomputed 182194 states for BTC/USD
+Cache fully covers up to target end date for ETH/USD.
+Precomputed 182278 states for ETH/USD
+Cache fully covers up to target end date for SOL/USD.
+Precomputed 141886 states for SOL/USD
+Cache fully covers up to target end date for LTC/USD.
+Precomputed 181589 states for LTC/USD
+Cache fully covers up to target end date for XRP/USD.
+Precomputed 75028 states for XRP/USD
+Cache fully covers up to target end date for DOGE/USD.
+Precomputed 182021 states for DOGE/USD
+Cache fully covers up to target end date for LINK/USD.
+Precomputed 181925 states for LINK/USD
+Cache fully covers up to target end date for ADA/USD.
+Precomputed 2962 states for ADA/USD
+
+==============================================
+====== NEW ARCHITECTURE BACKTEST ===================
+==============================================
+End Equity (Gross): $30291.13 (Initial: $10000.00)
+Total System PnL (Gross): $20291.13
+End Equity (Clean-only): $29429.78
+Clean PnL: $19429.78
+Contaminated PnL: $861.34
+
+--- RISK TIER BREAKDOWN ---
+PnL senza Top 5 winners: $8035.55
+PnL senza Top 10 winners: $926.34
+[EXTREME_10] Trades: 511 | Clean PnL: $17926.75 | Clean PF: 1.33
+[EXTREME_FALLBACK_5] Trades: 0 | Clean PnL: $0.00 | Clean PF: 0.00
+[NORMAL_5] Trades: 81 | Clean PnL: $2194.86 | Clean PF: 2.22
+[NORMAL_UPGRADED] Trades: 97 | Clean PnL: $-1126.30 | Clean PF: 0.72
+[TRANSITION_BLOCKED] Trades: 0 | Clean PnL: $0.00 | Clean PF: 0.00
+
+--- CHOP REGIME STATS ---
+CHOP Detected Candles: 42854
+Trades Blocked by CHOP: 0
+CHOP Base Entries Executed: 46
+Theoretical / Actual PnL in CHOP: $-419.38
+Clean PnL: $19429.78
+Contaminated PnL: $861.34
+Valid Trades: 893 | Contaminated Trades: 6
+Symbols w/ Gaps: DOGE/USD, XRP/USD, LTC/USD, LINK/USD
+Total Trades Executed: 899
+Win Rate: 40.4%
+
+--- ENGINE STATS ---
+EXTREME Engine: 515 trades | PnL: $18661.22 | PF: 1.35 | WR: 43.9%
+NORMAL Engine:  384 trades | PnL: $1629.91 | PF: 1.21 | WR: 35.7%
+
+--- BREAKOUT RETEST (FASE 7) STATS ---
+Candidates: 0
+Confirmed:  0
+Blocked:    0
+Reasons:     {}
+
+--- PROGRESSIVE EDGE DECAY (FASE 9) STATS ---
+Trades Closed by EDGE_DECAY_EARLY: 73 (Normal: 0, Extreme: 73)
+Classical EDGE_DECAY (48 bars): 2
+PnL 'Saved' from negative delayed exits: $239.68
+Positive PnL cut short (Premature exits): $22726.71 (on 64 trades)
+Generated backtest_report_latest.json
+Running... -> C.json
+--- MULTI-YEAR SIMULATION ARCHITECTURE V2 (MAX PERIOD) ---
+Loading Setup Expectancy Matrix...
+Loaded 29 setup logic constraints.
+Precomputing OHLCV...
+Cache fully covers up to target end date for BTC/USD.
+Precomputed 182194 states for BTC/USD
+Cache fully covers up to target end date for ETH/USD.
+Precomputed 182278 states for ETH/USD
+Cache fully covers up to target end date for SOL/USD.
+Precomputed 141886 states for SOL/USD
+Cache fully covers up to target end date for LTC/USD.
+Precomputed 181589 states for LTC/USD
+Cache fully covers up to target end date for XRP/USD.
+Precomputed 75028 states for XRP/USD
+Cache fully covers up to target end date for DOGE/USD.
+Precomputed 182021 states for DOGE/USD
+Cache fully covers up to target end date for LINK/USD.
+Precomputed 181925 states for LINK/USD
+Cache fully covers up to target end date for ADA/USD.
+Precomputed 2962 states for ADA/USD
+
+==============================================
+====== NEW ARCHITECTURE BACKTEST ===================
+==============================================
+End Equity (Gross): $27991.67 (Initial: $10000.00)
+Total System PnL (Gross): $17991.67
+End Equity (Clean-only): $27280.54
+Clean PnL: $17280.54
+Contaminated PnL: $711.14
+
+--- RISK TIER BREAKDOWN ---
+PnL senza Top 5 winners: $5469.00
+PnL senza Top 10 winners: $-1546.63
+[EXTREME_10] Trades: 492 | Clean PnL: $18516.45 | Clean PF: 1.35
+[EXTREME_FALLBACK_5] Trades: 0 | Clean PnL: $0.00 | Clean PF: 0.00
+[NORMAL_5] Trades: 23 | Clean PnL: $-240.11 | Clean PF: 0.62
+[NORMAL_UPGRADED] Trades: 12 | Clean PnL: $-144.55 | Clean PF: 0.53
+[TRANSITION_BLOCKED] Trades: 0 | Clean PnL: $0.00 | Clean PF: 0.00
+
+--- CHOP REGIME STATS ---
+CHOP Detected Candles: 43160
+Trades Blocked by CHOP: 0
+CHOP Base Entries Executed: 73
+Theoretical / Actual PnL in CHOP: $-312.71
+Clean PnL: $17280.54
+Contaminated PnL: $711.14
+Valid Trades: 695 | Contaminated Trades: 11
+Symbols w/ Gaps: DOGE/USD, LTC/USD, XRP/USD, LINK/USD
+Total Trades Executed: 706
+Win Rate: 41.1%
+
+--- ENGINE STATS ---
+EXTREME Engine: 496 trades | PnL: $19261.98 | PF: 1.36 | WR: 44.6%
+NORMAL Engine:  210 trades | PnL: $-1270.31 | PF: 0.71 | WR: 32.9%
+
+--- BREAKOUT RETEST (FASE 7) STATS ---
+Candidates: 0
+Confirmed:  0
+Blocked:    0
+Reasons:     {}
+
+--- PROGRESSIVE EDGE DECAY (FASE 9) STATS ---
+Trades Closed by EDGE_DECAY_EARLY: 70 (Normal: 0, Extreme: 70)
+Classical EDGE_DECAY (48 bars): 2
+PnL 'Saved' from negative delayed exits: $235.23
+Positive PnL cut short (Premature exits): $20954.49 (on 61 trades)
+Generated backtest_report_latest.json
+Running... -> D.json
+--- MULTI-YEAR SIMULATION ARCHITECTURE V2 (MAX PERIOD) ---
+Loading Setup Expectancy Matrix...
+Loaded 29 setup logic constraints.
+Precomputing OHLCV...
+Cache fully covers up to target end date for BTC/USD.
+Precomputed 182194 states for BTC/USD
+Cache fully covers up to target end date for ETH/USD.
+Precomputed 182278 states for ETH/USD
+Cache fully covers up to target end date for SOL/USD.
+Precomputed 141886 states for SOL/USD
+Cache fully covers up to target end date for LTC/USD.
+Precomputed 181589 states for LTC/USD
+Cache fully covers up to target end date for XRP/USD.
+Precomputed 75028 states for XRP/USD
+Cache fully covers up to target end date for DOGE/USD.
+Precomputed 182021 states for DOGE/USD
+Cache fully covers up to target end date for LINK/USD.
+Precomputed 181925 states for LINK/USD
+Cache fully covers up to target end date for ADA/USD.
+Precomputed 2962 states for ADA/USD
+
+==============================================
+====== NEW ARCHITECTURE BACKTEST ===================
+==============================================
+End Equity (Gross): $27813.01 (Initial: $10000.00)
+Total System PnL (Gross): $17813.01
+End Equity (Clean-only): $27006.74
+Clean PnL: $17006.74
+Contaminated PnL: $806.26
+
+--- RISK TIER BREAKDOWN ---
+PnL senza Top 5 winners: $5810.92
+PnL senza Top 10 winners: $-1030.26
+[EXTREME_10] Trades: 482 | Clean PnL: $17342.87 | Clean PF: 1.34
+[EXTREME_FALLBACK_5] Trades: 0 | Clean PnL: $0.00 | Clean PF: 0.00
+[NORMAL_5] Trades: 126 | Clean PnL: $-830.11 | Clean PF: 0.79
+[NORMAL_UPGRADED] Trades: 11 | Clean PnL: $-317.62 | Clean PF: 0.22
+[TRANSITION_BLOCKED] Trades: 0 | Clean PnL: $0.00 | Clean PF: 0.00
+
+--- CHOP REGIME STATS ---
+CHOP Detected Candles: 41234
+Trades Blocked by CHOP: 0
+CHOP Base Entries Executed: 119
+Theoretical / Actual PnL in CHOP: $-692.37
+Clean PnL: $17006.74
+Contaminated PnL: $806.26
+Valid Trades: 1067 | Contaminated Trades: 13
+Symbols w/ Gaps: DOGE/USD, LTC/USD, XRP/USD, LINK/USD
+Total Trades Executed: 1080
+Win Rate: 39.0%
+
+--- ENGINE STATS ---
+EXTREME Engine: 486 trades | PnL: $18068.55 | PF: 1.36 | WR: 44.2%
+NORMAL Engine:  594 trades | PnL: $-255.55 | PF: 0.97 | WR: 34.7%
+
+--- BREAKOUT RETEST (FASE 7) STATS ---
+Candidates: 0
+Confirmed:  0
+Blocked:    0
+Reasons:     {}
+
+--- PROGRESSIVE EDGE DECAY (FASE 9) STATS ---
+Trades Closed by EDGE_DECAY_EARLY: 64 (Normal: 0, Extreme: 64)
+Classical EDGE_DECAY (48 bars): 2
+PnL 'Saved' from negative delayed exits: $227.58
+Positive PnL cut short (Premature exits): $19890.20 (on 55 trades)
+Generated backtest_report_latest.json

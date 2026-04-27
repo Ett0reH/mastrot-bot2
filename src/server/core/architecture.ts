@@ -123,12 +123,77 @@ export const MathUtils = {
       arr.reduce((sq, n) => sq + Math.pow(n - mean, 2), 0) / arr.length,
     );
   },
+  getEMA: (arr: number[], period: number) => {
+    if (arr.length < period) return null;
+    const k = 2 / (period + 1);
+    let ema = arr.slice(0, period).reduce((a, b) => a + b, 0) / period;
+    for (let i = period; i < arr.length; i++) {
+      ema = (arr[i] - ema) * k + ema;
+    }
+    return ema;
+  },
+  getBollingerBands: (arr: number[], period: number, mult: number) => {
+    if (arr.length < period) return null;
+    const slice = arr.slice(-period);
+    const mean = slice.reduce((a, b) => a + b, 0) / period;
+    const stdDev = Math.sqrt(slice.reduce((sq, n) => sq + Math.pow(n - mean, 2), 0) / period);
+    return {
+      upper: mean + stdDev * mult,
+      middle: mean,
+      lower: mean - stdDev * mult
+    };
+  },
+  getADX: (bars: Bar[], period: number) => {
+    if (bars.length <= period) return null;
+    let smoothedTR = 0;
+    let smoothedPlusDM = 0;
+    let smoothedMinusDM = 0;
+    
+    // Initial smoothing
+    for (let i = 1; i <= period; i++) {
+        const h0 = bars[i-1].h, l0 = bars[i-1].l, c0 = bars[i-1].c;
+        const h1 = bars[i].h, l1 = bars[i].l, c1 = bars[i-1].c;
+        const tr = Math.max(h1 - l1, Math.abs(h1 - c0), Math.abs(l1 - c0));
+        let plusDM = h1 - h0 > l0 - l1 ? Math.max(h1 - h0, 0) : 0;
+        let minusDM = l0 - l1 > h1 - h0 ? Math.max(l0 - l1, 0) : 0;
+        smoothedTR += tr;
+        smoothedPlusDM += plusDM;
+        smoothedMinusDM += minusDM;
+    }
+
+    let dxArray: number[] = [];
+    
+    for (let i = period + 1; i < bars.length; i++) {
+        const h0 = bars[i-1].h, l0 = bars[i-1].l, c0 = bars[i-1].c;
+        const h1 = bars[i].h, l1 = bars[i].l, c1 = bars[i-1].c;
+        const tr = Math.max(h1 - l1, Math.abs(h1 - c0), Math.abs(l1 - c0));
+        let plusDM = h1 - h0 > l0 - l1 ? Math.max(h1 - h0, 0) : 0;
+        let minusDM = l0 - l1 > h1 - h0 ? Math.max(l0 - l1, 0) : 0;
+
+        smoothedTR = smoothedTR - (smoothedTR / period) + tr;
+        smoothedPlusDM = smoothedPlusDM - (smoothedPlusDM / period) + plusDM;
+        smoothedMinusDM = smoothedMinusDM - (smoothedMinusDM / period) + minusDM;
+
+        const plusDI = (smoothedPlusDM / smoothedTR) * 100;
+        const minusDI = (smoothedMinusDM / smoothedTR) * 100;
+        const dx = Math.abs(plusDI - minusDI) / (plusDI + minusDI) * 100;
+        dxArray.push(dx);
+    }
+    
+    if (dxArray.length < period) return null;
+    
+    let adx = dxArray.slice(0, period).reduce((a, b) => a + b, 0) / period;
+    for (let i = period; i < dxArray.length; i++) {
+        adx = ((adx * (period - 1)) + dxArray[i]) / period;
+    }
+    return adx;
+  }
 };
 
 // 1. MARKET DATA LAYER
 // Reads OHLCV, calculates volatility, momentum, statistical features.
 export class MarketDataLayer {
-  static prepareFeatures(bars1H: Bar[], bars4H: Bar[]) {
+  static prepareFeatures(bars1H: Bar[], bars4H: Bar[], isH4Closed: boolean = false) {
     const closes1H = bars1H.map((b) => b.c);
     const closes4H = bars4H.map((b) => b.c);
 
@@ -145,10 +210,21 @@ export class MarketDataLayer {
 
     const rsi1H = MathUtils.getRSI(closes1H, 14) || 50;
     const rsi1H_prev = MathUtils.getRSI(closes1H.slice(0, -1), 14) || 50;
+    const rsi2_1H = MathUtils.getRSI(closes1H, 2) || 50;
     const sma50_1H =
       MathUtils.getSMA(closes1H, 50) || closes1H[closes1H.length - 1];
     const sma200_4H =
       MathUtils.getSMA(closes4H, 200) || closes4H[closes4H.length - 1];
+    
+    const ema50_1H = MathUtils.getEMA(closes1H, 50) || closes1H[closes1H.length - 1];
+    const ema200_1H = MathUtils.getEMA(closes1H, 200) || closes1H[closes1H.length - 1];
+    
+    const rsi2_4H = MathUtils.getRSI(closes4H, 2) || 50;
+    const ema50_4H = MathUtils.getEMA(closes4H, 50) || closes4H[closes4H.length - 1];
+    const ema200_4H = MathUtils.getEMA(closes4H, 200) || closes4H[closes4H.length - 1];
+    
+    const adx_1H = MathUtils.getADX(bars1H, 14) || 0;
+    const bollinger_1H = MathUtils.getBollingerBands(closes1H, 20, 2.2);
 
     const prevHigh_1H = bars1H[bars1H.length - 2].h;
     const currentHigh_1H = bars1H[bars1H.length - 1].h;
@@ -218,6 +294,16 @@ export class MarketDataLayer {
       isBreakoutRetestShort,
       trend1H: lastC > sma50_1H ? 1 : -1,
       trend4H: lastC > sma200_4H ? 1 : -1,
+      rsi2_1H,
+      ema50_1H,
+      ema200_1H,
+      rsi2_4H,
+      ema50_4H,
+      ema200_4H,
+      isH4Closed,
+      adx_1H,
+      bollinger_1H,
+      t: bars1H[bars1H.length - 1].t
     };
   }
 }
@@ -258,6 +344,7 @@ export class RegimeLayer {
 export interface SignalContext {
   features: ReturnType<typeof MarketDataLayer.prepareFeatures>;
   regime: TradingRegime;
+  symbol: string;
   globalFeatures?: { btcTrend1H?: number; btcRegime?: TradingRegime };
 }
 
@@ -266,6 +353,7 @@ export interface SignalCandidate {
   quality: number;
   type: string;
   engine: "EXTREME" | "NORMAL" | "NONE";
+  meta?: any;
 }
 
 export function generateExtremeSignals(context: SignalContext): SignalCandidate {
@@ -301,6 +389,7 @@ export const RiskTierConfig = {
   EXTREME_FALLBACK: { exposure: 0.05, label: "EXTREME_FALLBACK_5" },
   NORMAL_BASE: { exposure: 0.05, label: "NORMAL_5" },
   NORMAL_UPGRADED: { exposure: 0.07, label: "NORMAL_UPGRADED" },
+  NORMAL_DOWNGRADED: { exposure: 0.03, label: "NORMAL_DOWNGRADED" },
   TRANSITION_BLOCKED: { exposure: 0.0, label: "TRANSITION_BLOCKED" }
 };
 
@@ -375,14 +464,23 @@ export function resolveRiskTier(tradeContext: TradeContext, clusterStats: Cluste
   }
 
   if (engine === "NORMAL") {
-    if (isClean && clusterStats.cleanProfitFactor >= 1.15) {
+    if (isClean && clusterStats.cleanProfitFactor >= 1.20) {
       return {
         exposurePct: RiskTierConfig.NORMAL_UPGRADED.exposure,
         blocked: false,
         fallback: false,
-        reason: "NORMAL engine + upgraded exposure (PF >= 1.15)",
+        reason: "NORMAL engine + upgraded exposure (PF >= 1.20)",
         cleanPFUsed: clusterStats.cleanProfitFactor,
         tierLabel: RiskTierConfig.NORMAL_UPGRADED.label
+      };
+    } else if (clusterStats.cleanProfitFactor < 1.0) {
+      return {
+        exposurePct: RiskTierConfig.NORMAL_DOWNGRADED.exposure,
+        blocked: false,
+        fallback: !isClean,
+        reason: "NORMAL engine + downgraded exposure (PF < 1.0)",
+        cleanPFUsed: clusterStats.cleanProfitFactor,
+        tierLabel: RiskTierConfig.NORMAL_DOWNGRADED.label
       };
     } else {
       return {
@@ -415,178 +513,117 @@ export const TradeBudgetMetrics = {
   NormalCleanGrossLoss: 0,
 };
 
-export function generateNormalMarketSignals(context: SignalContext): SignalCandidate {
-  const { features, regime, globalFeatures } = context;
+export const NormalRsi2TrendTrailingConfig = {
+  enabled: true,
+  allowLong: true,
+  allowShort: false,
+  rsiLength: 2,
+  rsiLongThreshold: 10,
+  fastMaLength: 50,
+  slowMaLength: 200,
+  maType: "EMA",
+  longTrailingStopPercent: 0.02,
+  cooldownBarsAfterExit: 1,
+  allowedNormalSubRegimes: ["BULL"],
+  blockedNormalSubRegimes: ["BEAR"],
+};
+
+export const NormalRsi2TrendTrailingStats = {
+  candidatesLong: 0,
+  entriesLong: 0,
+  pnlLong: 0,
+  pfLong: 0,
+  winRateLong: 0,
+
+  shortArmedSetups: 0,
+  shortConfirmedSetups: 0,
+  shortExpiredSetups: 0,
+  shortRejectedNoRejection: 0,
+  shortRejectedRegimeChanged: 0,
+  shortRejectedCloseAboveEma50: 0,
+  entriesShort: 0,
+  pnlShort: 0,
+  pfShort: 0,
+  winRateShort: 0,
+
+  totalNormalTrades: 0,
+  totalNormalPnL: 0,
+  totalNormalPF: 0,
+  totalNormalWinRate: 0,
+
+  blockedByRegime: 0,
+  blockedByExistingPosition: 0,
+  blockedByCooldown: 0,
+  exitsByTrailingStop: 0,
   
-  // Find Pullback in BULL
-  if (
-    regime === "BULL" &&
-    features.rsi1H > 35 &&
-    features.rsi1H < 50
-  ) {
-    if (FEATURE_FLAGS.ENABLE_CONFIRMED_PULLBACKS) {
-      PullbackMetrics.candidates++;
-      let isConfirmed = true;
-      let blockReason = "";
+  extremeSignalsBlockedByNormalPosition: 0,
+  normalSignalsBlockedByExtremePosition: 0,
+};
 
-      if (features.price <= features.sma200_4H) {
-        isConfirmed = false;
-        blockReason = "Prezzo sotto SMA200 4H";
-      } else if (features.price < features.sma50_1H) { 
-        isConfirmed = false;
-        blockReason = "Prezzo 1H sotto SMA50";
-      } else if (features.rsi1H <= features.rsi1H_prev) {
-        isConfirmed = false;
-        blockReason = "RSI non gira verso l'alto";
-      } else if (features.price <= features.prevHigh_1H) {
-        isConfirmed = false;
-        blockReason = "Candela non chiude sopra high precedente";
-      } else if (features.atr1H > features.atr1H_prev) {
-        isConfirmed = false;
-        blockReason = "ATR in espansione contro posizione";
-      } else if (globalFeatures?.btcTrend1H === -1) {
-        isConfirmed = false;
-        blockReason = "BTC in breakdown";
-      }
-      
-      if (isConfirmed) {
-        PullbackMetrics.confirmed++;
-        return { direction: "LONG", quality: 0.8, type: "PULLBACK", engine: "NORMAL" };
-      } else {
-        PullbackMetrics.blocked++;
-        PullbackMetrics.reasons[blockReason] = (PullbackMetrics.reasons[blockReason] || 0) + 1;
-      }
-    } else {
-      if (features.trend1H === -1) {
-        const distFromSMA50 = (features.price - features.sma50_1H) / features.sma50_1H;
-        if (FEATURE_FLAGS.ENHANCED_PULLBACK && distFromSMA50 < -0.03) {
-          // Ignora
-        } else {
-          return { direction: "LONG", quality: 0.8, type: "PULLBACK", engine: "NORMAL" };
-        }
-      }
-    }
+interface ArmedShortSetup {
+  armedTime: string; // we'll use candle block abstractly or something, or just an armed flag
+  armedClose: number;
+  armedRsi2: number;
+  armedEma50: number;
+  armedEma200: number;
+}
+export const normalShortSetups: Record<string, ArmedShortSetup | null> = {};
+
+export function generateNormalMarketSignals(context: SignalContext): SignalCandidate {
+  const { features, regime } = context;
+
+  // Solo alla chiusura della candela 4H
+  if (!features.isH4Closed) {
+      return { direction: "NEUTRAL", quality: 0, type: "NONE", engine: "NONE" };
   }
 
-  // Short Pullback in BEAR
+  // Activation regime
   if (
-    regime === "BEAR" &&
-    features.rsi1H > 50 &&
-    features.rsi1H < 65
+    NormalRsi2TrendTrailingConfig.blockedNormalSubRegimes.includes(regime) ||
+    !NormalRsi2TrendTrailingConfig.allowedNormalSubRegimes.includes(regime)
   ) {
-    if (FEATURE_FLAGS.ENABLE_CONFIRMED_PULLBACKS) {
-      PullbackMetrics.candidates++;
-      let isConfirmed = true;
-      let blockReason = "";
-
-      if (features.price >= features.sma200_4H) {
-        isConfirmed = false;
-        blockReason = "Prezzo sopra SMA200 4H";
-      } else if (features.price >= features.sma50_1H) {
-        isConfirmed = false;
-        blockReason = "Prezzo 1H sopra SMA50";
-      } else if (features.rsi1H >= features.rsi1H_prev) {
-        isConfirmed = false;
-        blockReason = "RSI non gira verso il basso";
-      } else if (features.price >= features.prevLow_1H) {
-        isConfirmed = false;
-        blockReason = "Candela non chiude sotto low precedente";
-      } else if (features.atr1H > features.atr1H_prev) {
-        isConfirmed = false;
-        blockReason = "ATR in espansione contro posizione";
-      } else if (globalFeatures?.btcTrend1H === 1) {
-        isConfirmed = false;
-        blockReason = "BTC in forte recupero";
-      }
-        
-      if (isConfirmed) {
-        PullbackMetrics.confirmed++;
-        return { direction: "SHORT", quality: 0.7, type: "PULLBACK", engine: "NORMAL" };
-      } else {
-        PullbackMetrics.blocked++;
-        PullbackMetrics.reasons[blockReason] = (PullbackMetrics.reasons[blockReason] || 0) + 1;
-      }
-    } else {
-      if (features.trend1H === 1) {
-        const distFromSMA50 = (features.price - features.sma50_1H) / features.sma50_1H;
-        if (FEATURE_FLAGS.ENHANCED_PULLBACK && distFromSMA50 > 0.03) {
-          // Ignora
-        } else {
-          return { direction: "SHORT", quality: 0.7, type: "PULLBACK", engine: "NORMAL" };
-        }
-      }
-    }
+      NormalRsi2TrendTrailingStats.blockedByRegime++;
+      return { direction: "NEUTRAL", quality: 0, type: "NONE", engine: "NONE" };
   }
 
-  // Breakout Retest setup (Fase 7)
-  if (FEATURE_FLAGS.ENABLE_BREAKOUT_RETEST) {
-    if ((regime === "BULL" || regime === "TRANSITION") && features.isBreakoutRetestLong) {
-      BreakoutRetestMetrics.candidates++;
-      let isConfirmed = true;
-      let blockReason = "";
+  const ema50 = features.ema50_4H || 0;
+  const ema200 = features.ema200_4H || 0;
+  const rsi2 = features.rsi2_4H || 50;
+  const price = features.price;
 
-      if (features.price <= features.sma50_1H) {
-         isConfirmed = false;
-         blockReason = "Prezzo sotto SMA50";
-      } else if (features.volZScore > 1.5) {
-         isConfirmed = false;
-         blockReason = "Volatilità esplosiva contro posizione";
-      } else if (globalFeatures?.btcTrend1H === -1) {
-         isConfirmed = false;
-         blockReason = "BTC non conferma (Breakdown)";
-      } else if (features.rsi1H > 70) {
-         isConfirmed = false;
-         blockReason = "RSI ipercomprato sul retest";
-      }
+  if (!ema50 || !ema200) {
+      return { direction: "NEUTRAL", quality: 0, type: "NONE", engine: "NONE" };
+  }
 
-      if (isConfirmed) {
-         BreakoutRetestMetrics.confirmed++;
-         return { direction: "LONG", quality: 0.85, type: "BREAKOUT_RETEST", engine: "NORMAL" };
-      } else {
-         BreakoutRetestMetrics.blocked++;
-         BreakoutRetestMetrics.reasons[blockReason] = (BreakoutRetestMetrics.reasons[blockReason] || 0) + 1;
-      }
-    }
-    
-    if ((regime === "BEAR" || regime === "TRANSITION") && features.isBreakoutRetestShort) {
-      BreakoutRetestMetrics.candidates++;
-      let isConfirmed = true;
-      let blockReason = "";
-
-      if (features.price >= features.sma50_1H) {
-         isConfirmed = false;
-         blockReason = "Prezzo sopra SMA50";
-      } else if (features.volZScore > 1.5) {
-         isConfirmed = false;
-         blockReason = "Volatilità esplosiva contro posizione";
-      } else if (globalFeatures?.btcTrend1H === 1) {
-         isConfirmed = false;
-         blockReason = "BTC non conferma (Recupero)";
-      } else if (features.rsi1H < 30) {
-         isConfirmed = false;
-         blockReason = "RSI ipervenduto sul retest";
-      }
-
-      if (isConfirmed) {
-         BreakoutRetestMetrics.confirmed++;
-         return { direction: "SHORT", quality: 0.85, type: "BREAKOUT_RETEST", engine: "NORMAL" };
-      } else {
-         BreakoutRetestMetrics.blocked++;
-         BreakoutRetestMetrics.reasons[blockReason] = (BreakoutRetestMetrics.reasons[blockReason] || 0) + 1;
-      }
-    }
+  // LONG SETUP
+  if (NormalRsi2TrendTrailingConfig.allowLong && ema50 > ema200 && price > ema200 && rsi2 < NormalRsi2TrendTrailingConfig.rsiLongThreshold) {
+      NormalRsi2TrendTrailingStats.candidatesLong++;
+      return { 
+        direction: "LONG", 
+        quality: 1.0, 
+        type: "RSI2_TREND_TRAILING", 
+        engine: "NORMAL",
+        meta: {
+            signalTime: new Date(features.t || 0).toISOString(),
+            rsi2AtSignal: rsi2,
+            ema50AtSignal: ema50,
+            ema200AtSignal: ema200,
+            trailingStopPercent: NormalRsi2TrendTrailingConfig.longTrailingStopPercent
+        }
+      };
   }
 
   return { direction: "NEUTRAL", quality: 0, type: "NONE", engine: "NONE" };
 }
 
-export class SignalLayer {
+  export class SignalLayer {
   static evaluate(
     features: ReturnType<typeof MarketDataLayer.prepareFeatures>,
     regime: TradingRegime,
+    symbol: string,
     globalFeatures?: { btcTrend1H?: number; btcRegime?: TradingRegime }
   ): SignalCandidate {
-    const context: SignalContext = { features, regime, globalFeatures };
+    const context: SignalContext = { features, regime, symbol, globalFeatures };
 
     // Orchestrate between Normal and Extreme based on macro regime
     if (regime === "CRASH" || regime === "EUPHORIA") {
@@ -706,7 +743,10 @@ export class GatekeeperLayer {
     // Chop Regime Overlay (FASE 4)
     let isChopBlocked = false;
     if (features.isChop) {
-      if (signal.type === "MEAN_REVERSION") {
+      if (signal.engine === "NORMAL") {
+        // NormalPullbackConvexEngine thrives in SIDEWAYS and mid-vol
+        // We do not block it here, let it pass with its own internal gate
+      } else if (signal.type === "MEAN_REVERSION") {
         if (signal.quality >= 0.8) {
           // Allow mean reversion but with heavily reduced size in chop
           return { allowed: true, reason: "CHOP_MEAN_REVERSION_ALLOWED", riskModifier: 0.5 };
@@ -721,7 +761,7 @@ export class GatekeeperLayer {
     }
 
     // Expectancy Matrix Filter (FASE 3)
-    if (FEATURE_FLAGS.SETUP_EXPECTANCY_FILTER && symbol !== "UNKNOWN") {
+    if (FEATURE_FLAGS.SETUP_EXPECTANCY_FILTER && symbol !== "UNKNOWN" && signal.engine !== "NORMAL") {
       const normalizedSymbol = symbol.replace('USDT', 'USD');
       const permission = ExpectancyTracker.getSetupPermission(
         normalizedSymbol,
@@ -870,7 +910,11 @@ export class RiskLayer {
     // SL logic (Initial Hard Stop based on 1.5x ATR to avoid whipsaws)
     let stopLoss = 0;
     let catastropheStopLoss = 0;
-    const slDist = features.atr1H * 3.5; // Omega: widened to 3.5x ATR // Omega: widened to 3.5x ATR
+    let slDist = features.atr1H * 3.5; // Omega: widened to 3.5x ATR
+    if (signal.engine === "NORMAL") {
+        const trailPct = NormalRsi2TrendTrailingConfig.longTrailingStopPercent;
+        slDist = features.price * trailPct;
+    }
 
     if (signal.direction === "LONG") {
       stopLoss = features.price - slDist;
@@ -946,6 +990,8 @@ export class PositionExitLayer {
 
     const risk = Math.abs(trade.entryPrice - trade.initialStopLoss);
     
+    let current_R = 0;
+    
     if (risk > 0) {
       // MFE / MAE Updates
       let mfe_raw = 0;
@@ -964,7 +1010,7 @@ export class PositionExitLayer {
       
       trade.mfeR = mfe_raw / risk;
       trade.maeR = mae_raw / risk;
-      const current_R = current_pnl / risk;
+      current_R = current_pnl / risk;
       
       if (current_R < 0) {
         trade.barsUnderEntry = (trade.barsUnderEntry || 0) + 1;
@@ -977,9 +1023,9 @@ export class PositionExitLayer {
       }
       
       // Fase 9: Progressive Edge Decay
-      if (FEATURE_FLAGS.enableProgressiveEdgeDecay) {
+      if (trade.engine !== "NORMAL" && FEATURE_FLAGS.enableProgressiveEdgeDecay) {
         
-        const isNormal = trade.engine === "NORMAL" || trade.setup === "PULLBACK" || trade.setup === "BREAKOUT_RETEST";
+        const isNormal = trade.setup === "PULLBACK" || trade.setup === "BREAKOUT_RETEST";
         const isExtreme = trade.engine === "EXTREME" || trade.entryRegime === "EUPHORIA" || trade.entryRegime === "CRASH";
         
         if (isNormal && !isExtreme && EDGE_DECAY_CONFIG.normal.enabled && FEATURE_FLAGS.enableLessAggressiveEdgeDecayNormal) {
@@ -1099,7 +1145,7 @@ export class PositionExitLayer {
     }
 
     // 0. Catastrophe Fallback Hit Check (If server missed standard checks or gap down)
-    if (trade.catastropheStopLoss) {
+    if (trade.engine !== "NORMAL" && trade.catastropheStopLoss) {
       if (
         trade.direction === "LONG" &&
         features.price <= trade.catastropheStopLoss
@@ -1113,7 +1159,7 @@ export class PositionExitLayer {
     }
 
     // 1. Emergency Strict Stop Loss Hit Check
-    if (trade.direction === "LONG" && features.price <= trade.currentStopLoss) {
+    if (trade.engine !== "NORMAL" && trade.direction === "LONG" && features.price <= trade.currentStopLoss) {
       if (!FEATURE_FLAGS.SEMANTIC_EXIT_REASONS)
         return { shouldExit: true, exitType: "STOP_LOSS" };
       if (trade.currentStopLoss === trade.initialStopLoss)
@@ -1123,6 +1169,7 @@ export class PositionExitLayer {
       return { shouldExit: true, exitType: "TRAILING_STOP_LOSS" };
     }
     if (
+      trade.engine !== "NORMAL" &&
       trade.direction === "SHORT" &&
       features.price >= trade.currentStopLoss
     ) {
@@ -1136,33 +1183,47 @@ export class PositionExitLayer {
     }
 
     // 2. Trailing Stop Management (Adaptive based on Entry Regime Volatility)
-    // Adjusts trail based on leverage to maintain nominal risk
-    const trailPct =
-      currentRegime === "EUPHORIA" || currentRegime === "CRASH" ? 0.08 : 0.04;
-    const adjustedTrail = trailPct / trade.leverage;
-
-    if (trade.direction === "LONG") {
-      const dynamicSL = trade.highWaterMark * (1 - adjustedTrail);
-      if (dynamicSL > trade.currentStopLoss) trade.currentStopLoss = dynamicSL; // Trail upwards
-      if (features.price <= dynamicSL) {
-        if (!FEATURE_FLAGS.SEMANTIC_EXIT_REASONS)
-          return { shouldExit: true, exitType: "TRAILING_STOP" };
-        if (features.price > trade.entryPrice)
-          return { shouldExit: true, exitType: "TRAILING_PROFIT_STOP" };
-        return { shouldExit: true, exitType: "TRAILING_STOP_LOSS" };
-      }
+    if (trade.engine === "NORMAL") {
+        if (trade.direction === "LONG") {
+            const trailPct = NormalRsi2TrendTrailingConfig.longTrailingStopPercent;
+            const dynamicSL = trade.highWaterMark * (1 - trailPct);
+            if (dynamicSL > trade.currentStopLoss || trade.currentStopLoss === 0) trade.currentStopLoss = dynamicSL;
+            if (features.price <= trade.currentStopLoss && trade.currentStopLoss !== 0) {
+               return { shouldExit: true, exitType: "TRAILING_STOP" };
+            }
+        }
+        
+        // NORMAL non ha time-decay o regime derisking aggiuntivo, forza ritorno NONE.
+        return { shouldExit: false, exitType: "NONE" };
     } else {
-      const dynamicSL = trade.lowWaterMark * (1 + adjustedTrail);
-      if (dynamicSL < trade.currentStopLoss) trade.currentStopLoss = dynamicSL; // Trail downwards
-      if (features.price >= dynamicSL) {
-        if (!FEATURE_FLAGS.SEMANTIC_EXIT_REASONS)
-          return { shouldExit: true, exitType: "TRAILING_STOP" };
-        if (features.price < trade.entryPrice)
-          return { shouldExit: true, exitType: "TRAILING_PROFIT_STOP" };
-        return { shouldExit: true, exitType: "TRAILING_STOP_LOSS" };
+      // Adjusts trail based on leverage to maintain nominal risk
+      const trailPct =
+        currentRegime === "EUPHORIA" || currentRegime === "CRASH" ? 0.08 : 0.04;
+      const adjustedTrail = trailPct / trade.leverage;
+
+      if (trade.direction === "LONG") {
+        const dynamicSL = trade.highWaterMark * (1 - adjustedTrail);
+        if (dynamicSL > trade.currentStopLoss) trade.currentStopLoss = dynamicSL; // Trail upwards
+        if (features.price <= dynamicSL) {
+          if (!FEATURE_FLAGS.SEMANTIC_EXIT_REASONS)
+            return { shouldExit: true, exitType: "TRAILING_STOP" };
+          if (features.price > trade.entryPrice)
+            return { shouldExit: true, exitType: "TRAILING_PROFIT_STOP" };
+          return { shouldExit: true, exitType: "TRAILING_STOP_LOSS" };
+        }
+      } else {
+        const dynamicSL = trade.lowWaterMark * (1 + adjustedTrail);
+        if (dynamicSL < trade.currentStopLoss) trade.currentStopLoss = dynamicSL; // Trail downwards
+        if (features.price >= dynamicSL) {
+          if (!FEATURE_FLAGS.SEMANTIC_EXIT_REASONS)
+            return { shouldExit: true, exitType: "TRAILING_STOP" };
+          if (features.price < trade.entryPrice)
+            return { shouldExit: true, exitType: "TRAILING_PROFIT_STOP" };
+          return { shouldExit: true, exitType: "TRAILING_STOP_LOSS" };
+        }
       }
     }
-
+    
     // 3. Edge Decay (Time Stop)
     // If trade hasn't worked out in 48 hours (48 bars), edge is dead.
     if (trade.barsHeld > 48)

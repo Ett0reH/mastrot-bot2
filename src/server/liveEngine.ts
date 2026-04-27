@@ -213,6 +213,7 @@ export async function initExchange() {
     enableRateLimit: true,
     timeout: 10000 // enforce 10s ccxt timeout
   });
+  exchange.setSandboxMode(true); // Ensure all execution goes to https://demo-futures.kraken.com/
 }
 
 export async function getLiveState(): Promise<LiveState> {
@@ -431,6 +432,25 @@ async function loopTick() {
         if (exitDecision.shouldExit) {
             console.log(`[EXIT LAYER] Closing ${p.symbol} ${p.direction} at $${livePrice}. Reason: ${exitDecision.exitType}`);
             
+            let isLiveExitSuccess = true;
+            if (process.env.LIVE_TRADING_ENABLED === 'true') {
+                 const side = p.direction === 'LONG' ? 'sell' : 'buy';
+                 try {
+                     console.log(`[LIVE EXECUTION] Sending ${side} exit order for ${p.symbol} to Kraken Futures...`);
+                     const order = await exchange.createMarketOrder(p.symbol, side, p.size);
+                     console.log(`[LIVE EXECUTION] Exit order successful:`, order.id);
+                 } catch(e: any) {
+                     console.error(`[LIVE EXECUTION] Exit order failed for ${p.symbol}:`, e.message);
+                     isLiveExitSuccess = false;
+                 }
+            }
+
+            if (!isLiveExitSuccess) {
+                // If live trading exit fails, keep the position to attempt exit next tick
+                positionsToKeep.push(p);
+                continue;
+            }
+
             const exitSizeValue = p.size * livePrice;
             const exitFee = exitSizeValue * FEE_RATE;
             const entryValue = p.size * p.entryPrice;
@@ -535,7 +555,7 @@ async function loopTick() {
           
           if (sym1H.length > 50 && sym4H.length > 200) {
               const features = MarketDataLayer.prepareFeatures(sym1H, sym4H);
-              const signal = SignalLayer.evaluate(features, state.regime as TradingRegime, { btcTrend1H: globalFeatures?.trend1H, btcRegime: state.regime as TradingRegime });
+              const signal = SignalLayer.evaluate(features, state.regime as TradingRegime, symbol, { btcTrend1H: globalFeatures?.trend1H, btcRegime: state.regime as TradingRegime });
               
               if (signal.direction !== 'NEUTRAL') {
                   const gate = GatekeeperLayer.allowEntry(signal, features, state.regime as TradingRegime, symbol);
@@ -555,24 +575,42 @@ async function loopTick() {
                       
                       if (finalSize > 0) {
                           console.log(`[ENTRY LAYER] Open ${symbol} ${signal.direction} at $${features.price}`);
-                          simulatedPositions.push({
-                              id: `t_${Date.now()}_${symbol}`,
-                              symbol,
-                              direction: signal.direction,
-                              entryPrice: features.price,
-                              size: finalSize,
-                              leverage: risk.leverage,
-                              initialStopLoss: risk.stopLoss,
-                              currentStopLoss: risk.stopLoss,
-                              catastropheStopLoss: risk.catastropheStopLoss,
-                              // If using real Binance keys: 
-                              // catastropheOrderId: await exchange.createOrder(symbol, 'stop_market', sellDirection, size, ...),
-                              highWaterMark: features.price,
-                              lowWaterMark: features.price,
-                              barsHeld: 0,
-                              entryRegime: state.regime as TradingRegime,
-                              unrealizedPnl: 0
-                          } as ActiveTrade);
+                          
+                          let isLiveExecutionSuccess = true;
+                          let brokerOrderId = `t_${Date.now()}_${symbol}`;
+
+                          if (process.env.LIVE_TRADING_ENABLED === 'true') {
+                              console.log(`[LIVE EXECUTION] Sending ${signal.direction} order for ${symbol} to Kraken Futures...`);
+                              const side = signal.direction === 'LONG' ? 'buy' : 'sell';
+                              try {
+                                  // For Kraken Futures, we execute a market order
+                                  const order = await exchange.createMarketOrder(symbol, side, finalSize);
+                                  console.log(`[LIVE EXECUTION] Order successful:`, order.id);
+                                  brokerOrderId = order.id;
+                              } catch(e: any) {
+                                  console.error(`[LIVE EXECUTION] Order failed for ${symbol}:`, e.message);
+                                  isLiveExecutionSuccess = false;
+                              }
+                          }
+
+                          if (isLiveExecutionSuccess) {
+                              simulatedPositions.push({
+                                  id: brokerOrderId,
+                                  symbol,
+                                  direction: signal.direction,
+                                  entryPrice: features.price,
+                                  size: finalSize,
+                                  leverage: risk.leverage,
+                                  initialStopLoss: risk.stopLoss,
+                                  currentStopLoss: risk.stopLoss,
+                                  catastropheStopLoss: risk.catastropheStopLoss,
+                                  highWaterMark: features.price,
+                                  lowWaterMark: features.price,
+                                  barsHeld: 0,
+                                  entryRegime: state.regime as TradingRegime,
+                                  unrealizedPnl: 0
+                              } as ActiveTrade);
+                          }
                       }
                   } else {
                       console.log(`[GATEKEEPER] Denied ${signal.direction} on ${symbol}: ${gate.reason}`);

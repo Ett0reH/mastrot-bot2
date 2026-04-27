@@ -172,6 +172,7 @@ export function generateAdvancedAggregations(
   const byDurationBucket: Record<string, TradeLog[]> = {};
   const byLeverage: Record<string, TradeLog[]> = {};
   const byCapImmobilizzatoBucket: Record<string, TradeLog[]> = {};
+  const bySide: Record<string, TradeLog[]> = {};
 
   const getBucket = (val: number, steps: number[]) => {
     for (const s of steps) {
@@ -226,6 +227,9 @@ export function generateAdvancedAggregations(
     if (!byCapImmobilizzatoBucket[capBuck])
       byCapImmobilizzatoBucket[capBuck] = [];
     byCapImmobilizzatoBucket[capBuck].push(t);
+      
+    if (!bySide[t.type]) bySide[t.type] = [];
+    bySide[t.type].push(t);
   }
 
   const mapToMetrics = (record: Record<string, TradeLog[]>) => {
@@ -274,6 +278,7 @@ export function generateAdvancedAggregations(
       byDurationBucket: mapToMetrics(byDurationBucket),
       byLeverage: mapToMetrics(byLeverage),
       byCapImmobilizzatoBucket: mapToMetrics(byCapImmobilizzatoBucket),
+      bySide: mapToMetrics(bySide),
     },
     topLists: {
       top20Winning,

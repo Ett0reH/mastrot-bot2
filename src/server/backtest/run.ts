@@ -18,7 +18,9 @@ import {
   PullbackMetrics,
   BreakoutRetestMetrics,
   TradeBudgetMetrics,
-  resolveRiskTier
+  resolveRiskTier,
+  NormalRsi2TrendTrailingConfig,
+  NormalRsi2TrendTrailingStats
 } from "../core/architecture";
 
 // Alpaca API Credentials
@@ -51,6 +53,7 @@ interface TradeLog {
   entryRegime?: string;
   setup?: string;
   engine?: string;
+  tierLabel?: string;
   isChopEntry?: boolean;
   maxUnrealizedPnlPercent?: number;
   maxNegativeExcursionPercent?: number;
@@ -66,6 +69,7 @@ interface TradeLog {
   barsUnderEntry?: number;
   barsToHalfR?: number;
   barsToOneR?: number;
+  meta?: any;
 }
 
 async function fetch15mData(
@@ -193,8 +197,8 @@ async function fetch15mData(
 async function runEventDrivenBacktest() {
   process.env.BACKTEST_MODE = "true";
   console.log("--- MULTI-YEAR SIMULATION ARCHITECTURE V2 (MAX PERIOD) ---");
-  const start = "2023-01-01T00:00:00Z";
-  const end = "2026-04-25T20:00:00Z";
+  const start = "2021-01-01T00:00:00Z";
+  const end = "2026-04-27T00:00:00Z";
 
   // FASE 3: Load Expectancy Matrix
   try {
@@ -255,6 +259,7 @@ async function runEventDrivenBacktest() {
         cur1H.v += tick.v;
       }
       let h1Closed = false;
+      let h4Closed = false;
       if (min === 45) {
         bars1H.push({ ...cur1H });
         cur1H = null;
@@ -271,17 +276,19 @@ async function runEventDrivenBacktest() {
       if (min === 45 && (hour + 1) % 4 === 0) {
         bars4H.push({ ...cur4H });
         cur4H = null;
+        h4Closed = true;
       }
 
-      if (bars1H.length < 50 || bars4H.length < 200) continue;
+      if (bars1H.length < 250 || bars4H.length < 250) continue;
 
       let features = null;
       let regime: TradingRegime = "UNKNOWN";
 
       if (h1Closed) {
         features = MarketDataLayer.prepareFeatures(
-          bars1H.slice(-55),
-          bars4H.slice(-210),
+          bars1H.slice(-250),
+          bars4H.slice(-250),
+          h4Closed
         );
         regime = RegimeLayer.detect(features);
       }
@@ -291,6 +298,7 @@ async function runEventDrivenBacktest() {
         h1Closed,
         features,
         regime,
+        bars4HLength: bars4H.length
       });
     }
     symbolStates[symbol] = ticksWithState;
@@ -316,6 +324,8 @@ async function runEventDrivenBacktest() {
   );
 
   let maxNewPositionsPerCandle = 3;
+
+  const lastExit4HLength: Record<string, number> = {};
 
   for (let i = 0; i < maxTicks; i++) {
     // --- GLOBAL FLOATING EQUITY UPDATE ---
@@ -490,9 +500,22 @@ async function runEventDrivenBacktest() {
               position.leverage;
           }
 
-          if (position.engine === "NORMAL" && !position.isContaminated) {
-            if (tradeNetPnL > 0) TradeBudgetMetrics.NormalCleanGrossProfit += tradeNetPnL;
-            else TradeBudgetMetrics.NormalCleanGrossLoss += tradeNetPnL;
+          if (position.engine === "NORMAL") {
+             if (exitDecision.exitType === "TRAILING_STOP") {
+                 NormalRsi2TrendTrailingStats.exitsByTrailingStop++;
+             }
+             if (position.direction === "LONG") {
+                 NormalRsi2TrendTrailingStats.pnlLong += tradeNetPnL;
+                 if (tradeNetPnL > 0) NormalRsi2TrendTrailingStats.winRateLong++; // Will convert to % later
+             } else {
+                 NormalRsi2TrendTrailingStats.pnlShort += tradeNetPnL;
+                 if (tradeNetPnL > 0) NormalRsi2TrendTrailingStats.winRateShort++;
+             }
+             
+             if (!position.isContaminated) {
+               if (tradeNetPnL > 0) TradeBudgetMetrics.NormalCleanGrossProfit += tradeNetPnL;
+               else TradeBudgetMetrics.NormalCleanGrossLoss += tradeNetPnL;
+             }
           }
 
           allTrades.push({
@@ -527,8 +550,10 @@ async function runEventDrivenBacktest() {
             barsToHalfR: position.barsToHalfR,
             barsToOneR: position.barsToOneR,
             isReducedLeverageAction: (position as any).isReducedLeverageAction,
+            meta: (position as any).meta
           } as any);
           activePositions[symbol] = null;
+          lastExit4HLength[symbol] = symbolStates[symbol][i].bars4HLength;
         }
         // Continue is removed from here because we will process entries in a separate loop
       }
@@ -539,7 +564,7 @@ async function runEventDrivenBacktest() {
     
     for (const symbol of SYMBOLS) {
       if (!symbolStates[symbol] || !symbolStates[symbol][i]) continue;
-      const { tick, h1Closed, features, regime } = symbolStates[symbol][i];
+      const { tick, h1Closed, features, regime, bars4HLength } = symbolStates[symbol][i];
       let position = activePositions[symbol];
 
       if (!position && h1Closed && features && !capitalHealth.isHalted) {
@@ -552,7 +577,17 @@ async function runEventDrivenBacktest() {
           btcRegime = symbolStates["BTC/USD"][i].regime;
         }
 
-        const signal = SignalLayer.evaluate(features, regime, { btcTrend1H, btcRegime });
+        const signal = SignalLayer.evaluate(features, regime, symbol, { btcTrend1H, btcRegime });
+
+        // Cooldown per NORMAL: Attendere 1 candela 4H completa
+        if (signal.direction !== "NEUTRAL" && signal.engine === "NORMAL") {
+            const lastExit = lastExit4HLength[symbol] || 0;
+            // Se non è passata almeno 1 candela 4H COMPLETA
+            if (bars4HLength <= lastExit) {
+                NormalRsi2TrendTrailingStats.blockedByCooldown++;
+                continue; // Skip entry due to cooldown
+            }
+        }
 
         if (signal.direction !== "NEUTRAL") {
           const gate = GatekeeperLayer.allowEntry(
@@ -567,6 +602,9 @@ async function runEventDrivenBacktest() {
             chopBlockedSetups[signal.type] = (chopBlockedSetups[signal.type] || 0) + 1;
           }
 
+          if (!gate.allowed && signal.type === "RSI2_TREND_TRAILING" && signal.direction === "SHORT") {
+             console.log(`Gatekeeper blocked SHORT: ${gate.reason} for ${symbol}`);
+          }
           if (gate.allowed) {
             const currTickTime = new Date(tick.t).getTime();
             const prevTickTime = symbolStates[symbol][i - 1] ? new Date(symbolStates[symbol][i - 1].tick.t).getTime() : currTickTime;
@@ -584,6 +622,9 @@ async function runEventDrivenBacktest() {
             }, { cleanProfitFactor });
 
             if (tierDecision.blocked || tierDecision.tierLabel === "TRANSITION_BLOCKED") {
+                if (signal.type === "RSI2_TREND_TRAILING" && signal.direction === "SHORT") {
+                    console.log(`Tier blocked SHORT for ${symbol}`);
+                }
                 // Skip entry entirely
                 continue;
             }
@@ -601,7 +642,7 @@ async function runEventDrivenBacktest() {
 
             let finalSize = risk.positionSize * capitalHealth.allowedCapacityMultiplier;
 
-            if (finalSize > 0) {
+              if (finalSize > 0) {
               candidateSignals.push({
                 symbol,
                 tick,
@@ -614,7 +655,8 @@ async function runEventDrivenBacktest() {
                 // Metric for ranking FASE 11
                 qualityScore: signal.quality,
                 distanceToStop: Math.abs(features.price - risk.stopLoss) / features.price,
-                isBtcAligned: (signal.direction === "LONG" && btcTrend1H === 1) || (signal.direction === "SHORT" && btcTrend1H === -1)
+                isBtcAligned: (signal.direction === "LONG" && btcTrend1H === 1) || (signal.direction === "SHORT" && btcTrend1H === -1),
+                meta: signal.meta
               });
             }
           }
@@ -656,8 +698,13 @@ async function runEventDrivenBacktest() {
                  engine: candidate.signal.engine,
                  tierLabel: candidate.tierDecision.tierLabel,
                  isChopEntry: candidate.features.isChop,
+                 meta: candidate.meta,
                  ...(candidate.risk.isReducedLeverageAction && { isReducedLeverageAction: true }),
                } as any;
+               
+               if (candidate.signal.engine === "NORMAL") {
+                   // tracked at the end of the script
+               }
                
                AnalyticsLayer.logDecision("ENTRY", candidate.symbol, candidate.signal.direction, {
                  type: candidate.signal.type,
@@ -668,6 +715,9 @@ async function runEventDrivenBacktest() {
                TradeBudgetMetrics.executedSignals++;
            } else {
                // Skip
+               if (candidate.signal.type === "RSI2_TREND_TRAILING" && candidate.signal.direction === "SHORT") {
+                   console.log(`Trade Budget blocked SHORT for ${candidate.symbol}`);
+               }
                TradeBudgetMetrics.skippedSignals++;
                AnalyticsLayer.logDecision("SKIPPED", candidate.symbol, candidate.signal.direction, {
                  reason: "TRADE_BUDGET_EXCEEDED",
@@ -701,6 +751,10 @@ async function runEventDrivenBacktest() {
                isChopEntry: candidate.features.isChop,
                ...(candidate.risk.isReducedLeverageAction && { isReducedLeverageAction: true }),
              } as any;
+             
+             if (candidate.signal.engine === "NORMAL") {
+                 // tracked at the end of the script
+             }
              
              AnalyticsLayer.logDecision("ENTRY", candidate.symbol, candidate.signal.direction, {
                type: candidate.signal.type,
@@ -920,8 +974,8 @@ async function runEventDrivenBacktest() {
       (a, b) => new Date(a.exitTime).getTime() - new Date(b.exitTime).getTime(),
     );
 
-    const startDate = new Date("2023-01-01T00:00:00Z");
-    const endDate = new Date("2026-04-25T20:00:00Z");
+    const startDate = new Date("2021-01-01T00:00:00Z");
+    const endDate = new Date("2026-04-27T20:00:00Z");
     const days = Math.round(
       (endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24),
     );
@@ -1066,6 +1120,30 @@ async function runEventDrivenBacktest() {
     .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl))
     .slice(0, 5);
 
+  const nt = allTrades.filter(t => t.engine === "NORMAL");
+  NormalRsi2TrendTrailingStats.totalNormalTrades = nt.length;
+  NormalRsi2TrendTrailingStats.totalNormalPnL = nt.reduce((a, b) => a + b.pnl, 0);
+  const nGrossWin = nt.filter(t => t.pnl > 0).reduce((a, b) => a + b.pnl, 0);
+  const nGrossLoss = Math.abs(nt.filter(t => t.pnl <= 0).reduce((a, b) => a + b.pnl, 0));
+  NormalRsi2TrendTrailingStats.totalNormalPF = nGrossLoss === 0 ? (nGrossWin > 0 ? 999 : 0) : nGrossWin / nGrossLoss;
+  NormalRsi2TrendTrailingStats.totalNormalWinRate = nt.length > 0 ? nt.filter(t => t.pnl > 0).length / nt.length : 0;
+  
+  const lTrades = nt.filter(t => t.type === "LONG");
+  const sTrades = nt.filter(t => t.type === "SHORT");
+  
+  NormalRsi2TrendTrailingStats.entriesLong = lTrades.length;
+  NormalRsi2TrendTrailingStats.entriesShort = sTrades.length;
+  
+  const lWin = lTrades.filter(t => t.pnl > 0).reduce((a, b) => a + b.pnl, 0);
+  const lLoss = Math.abs(lTrades.filter(t => t.pnl <= 0).reduce((a, b) => a + b.pnl, 0));
+  NormalRsi2TrendTrailingStats.pfLong = lLoss === 0 ? (lWin > 0 ? 999 : 0) : lWin / lLoss;
+  NormalRsi2TrendTrailingStats.winRateLong = lTrades.length > 0 ? lTrades.filter(t => t.pnl > 0).length / lTrades.length : 0;
+  
+  const sWin = sTrades.filter(t => t.pnl > 0).reduce((a, b) => a + b.pnl, 0);
+  const sLoss = Math.abs(sTrades.filter(t => t.pnl <= 0).reduce((a, b) => a + b.pnl, 0));
+  NormalRsi2TrendTrailingStats.pfShort = sLoss === 0 ? (sWin > 0 ? 999 : 0) : sWin / sLoss;
+  NormalRsi2TrendTrailingStats.winRateShort = sTrades.length > 0 ? sTrades.filter(t => t.pnl > 0).length / sTrades.length : 0;
+
   const advancedStats = generateAdvancedAggregations(
     allTrades as any,
     globalEquity - 10000,
@@ -1083,7 +1161,7 @@ async function runEventDrivenBacktest() {
   const configUsed = {
     symbols: SYMBOLS,
     timeframe: "1H/4H features calculated from 15m ticks",
-    period: "2023-01-01T00:00:00Z to 2026-04-25T20:00:00Z",
+    period: "2021-01-01T00:00:00Z to 2026-04-27T00:00:00Z",
     initialCapital: 10000,
     fee: FEE_RATE,
     slippage: "Included in initial execution assumptions inside core",
@@ -1107,7 +1185,9 @@ async function runEventDrivenBacktest() {
         },
         engineStats: {
            extreme: extremeStatsLog,
-           normal: normalStatsLog
+           normal: normalStatsLog,
+           normalConfig: NormalRsi2TrendTrailingConfig,
+           normalStats: NormalRsi2TrendTrailingStats,
         },
         pullbackStats: PullbackMetrics,
         breakoutRetestStats: BreakoutRetestMetrics,

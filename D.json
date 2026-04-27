@@ -51,17 +51,16 @@
       "allowShort": false,
       "rsiLength": 2,
       "rsiLongThreshold": 10,
+      "rsiShortThreshold": 90,
       "fastMaLength": 50,
       "slowMaLength": 200,
       "maType": "EMA",
+      "shortRequiresRejectionConfirmation": false,
+      "shortRequiresCloseBelowEma50": false,
       "longTrailingStopPercent": 0.02,
+      "shortTrailingStopPercent": 0.03,
       "cooldownBarsAfterExit": 1,
-      "allowedNormalSubRegimes": [
-        "BULL"
-      ],
-      "blockedNormalSubRegimes": [
-        "BEAR"
-      ]
+      "allowedSymbols": null
     },
     "normalStats": {
       "candidatesLong": 280,

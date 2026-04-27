@@ -170,7 +170,7 @@ export default function Dashboard() {
 
   const metrics = useMemo(() => {
     return calculateMetrics(liveState);
-  }, [liveState?.equityHistory, liveState?.openPositions, liveState?.balance]);
+  }, [liveState?.equityHistory, liveState?.openPositions, liveState?.balance, liveState?.recentTrades, liveState?.metricsHistory]);
 
   const chartData = useMemo(() => {
     let points = [];
@@ -721,6 +721,7 @@ export default function Dashboard() {
                       title: '03 // OPERATIONAL QUALITY',
                       icon: <Sliders className="w-3.5 h-3.5 text-white/50" />,
                       items: [
+                        { label: 'Trades Count', key: 'tradesCount', fmt: (v: number) => v.toFixed(1), polarity: true, defaultColor: 'text-white/70' },
                         { label: 'Profit Factor', key: 'profitFactor', fmt: (v: number) => v.toFixed(2), polarity: true, defaultColor: 'text-[#10B981]' },
                         { label: 'Hit Rate', key: 'hitRate', fmt: (v: number) => `${(v * 100).toFixed(1)}%`, polarity: false, defaultColor: 'text-[#10B981]' },
                         { label: 'Expectancy', key: 'expectancy', fmt: (v: number) => v.toFixed(2), polarity: true, defaultColor: 'text-[#93C5FD]' },
