@@ -641,6 +641,10 @@ async function loopTick() {
               const features = MarketDataLayer.prepareFeatures(sym1H, sym4H);
               const signal = SignalLayer.evaluate(features, state.regime as TradingRegime, symbol, { btcTrend1H: globalFeatures?.trend1H, btcRegime: state.regime as TradingRegime });
               
+              if (symbol === 'BTC/USD:USD') {
+                  console.log(`[DATA CHECK] ${symbol} Price: ${features.price}, RSI: ${features.rsi1H ? features.rsi1H.toFixed(2) : 'N/A'}, Regime: ${state.regime}, Signal: ${signal.direction}`);
+              }
+
               if (signal.direction !== 'NEUTRAL') {
                   const gate = GatekeeperLayer.allowEntry(signal, features, state.regime as TradingRegime, symbol);
                   if (gate.allowed) {
