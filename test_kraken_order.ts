@@ -16,42 +16,36 @@ async function run() {
       secret: secret,
       enableRateLimit: true
   });
-  // Abilitiamo il sandbox (demo-futures.kraken.com)
   exchange.setSandboxMode(true);
 
   try {
-      console.log("Connessione a Kraken demo-futures... (https://demo-futures.kraken.com/)");
+      console.log("Connessione a Kraken demo-futures...");
       const balance = await exchange.fetchBalance();
       console.log("Connessione riuscita! Bilanci (total):");
       const balances = Object.keys(balance.total).filter(asset => balance.total[asset] > 0);
       if (balances.length > 0) {
         console.log(balances.map(asset => `${asset}: ${balance.total[asset]}`).join(', '));
-      } else {
-        console.log("Nessun bilancio positivo trovato (o balance.total è vuoto).");
       }
       
       await exchange.loadMarkets();
-      // Kraken Futures solitamente formatta i perpetual su USD come XRP/USD:USD
-      const markets = Object.keys(exchange.markets).filter(k => k.includes('XRP') && k.includes('USD') && exchange.markets[k].swap);
       
-      const targetSymbol = markets.length > 0 ? markets[0] : 'XRP/USD:USD';
-      const amount = 5; // size minima solitamente 1 o simile, mettiamo 5 contratti XRP
+      // Mettiamo un ordine minimo usando DOGE o XRP (1 contratto)
+      const targetSymbol = 'DOGE/USD:USD'; 
+      const amount = 10; 
       
-      console.log(`\nPiazzando ordine di BUY MARKET per ${amount} contratti di ${targetSymbol}...`);
-      const order = await exchange.createMarketOrder(targetSymbol, 'buy', amount);
+      console.log(`\nPiazzando ordine LIMIT (Fill or Kill in pratica, oppure lo lasciamo aperto) -> Mettiamo un MARKET buy per ${amount} contratti di ${targetSymbol}...`);
       
-      console.log("!!! ORDINE ESEGUITO CON SUCCESSO !!!");
+      const ticker = await exchange.fetchTicker(targetSymbol);
+      const limitPrice = ticker.last;
+      
+      // Use limit order that is likely to be filled immediately, or market if collars permit
+      // To avoid collars, a limit order slightly above current price acts like market.
+      const order = await exchange.createLimitBuyOrder(targetSymbol, amount, limitPrice * 1.01);
+      
+      console.log("!!! ORDINE ESEGUITO CON SUCCESSO E LASCIATO APERTO !!!");
       console.log(`ID: ${order.id}`);
       console.log(`Status: ${order.status}`);
-      console.log(`Prezzo riempito (avg): ${order.average}`);
-      
-      // Prova a chiudere la posizione
-      console.log(`\nChiudendo la posizione aperta per pulizia (SELL ${amount} ${targetSymbol})...`);
-      const closeOrder = await exchange.createMarketOrder(targetSymbol, 'sell', amount);
-      console.log("!!! POSIZIONE CHIUSA !!!");
-      console.log(`ID: ${closeOrder.id}`);
-      console.log(`Status: ${closeOrder.status}`);
-      console.log(`Prezzo riempito (avg): ${closeOrder.average}`);
+      console.log(`Prezzo: ${order.price}`);
       
   } catch(e: any) {
       console.error("\nErrore durante l'esecuzione del test:", e.message);

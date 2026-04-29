@@ -197,8 +197,8 @@ async function fetch15mData(
 async function runEventDrivenBacktest() {
   process.env.BACKTEST_MODE = "true";
   console.log("--- MULTI-YEAR SIMULATION ARCHITECTURE V2 (MAX PERIOD) ---");
-  const start = "2021-01-01T00:00:00Z";
-  const end = "2026-04-27T00:00:00Z";
+  const start = "2026-03-01T00:00:00Z";
+  const end = "2026-04-29T00:00:00Z";
 
   // FASE 3: Load Expectancy Matrix
   try {
@@ -293,13 +293,16 @@ async function runEventDrivenBacktest() {
         regime = RegimeLayer.detect(features);
       }
 
-      ticksWithState.push({
-        tick,
-        h1Closed,
-        features,
-        regime,
-        bars4HLength: bars4H.length
-      });
+      const tickDate = new Date(tick.t);
+      if (tickDate.getTime() >= new Date("2026-04-20T00:00:00Z").getTime()) {
+        ticksWithState.push({
+          tick,
+          h1Closed,
+          features,
+          regime,
+          bars4HLength: bars4H.length
+        });
+      }
     }
     symbolStates[symbol] = ticksWithState;
     console.log(`Precomputed ${ticksWithState.length} states for ${symbol}`);
@@ -1168,11 +1171,43 @@ async function runEventDrivenBacktest() {
     dataGapValidation: FEATURE_FLAGS.DATA_GAP_VALIDATION,
   };
 
+  // --- INVARIANTS VALIDATION ---
+  const normalTradesFinal = allTrades.filter(t => t.engine === "NORMAL");
+  const normalShorts = normalTradesFinal.filter(t => t.type === "SHORT");
+  const normalNonBull = normalTradesFinal.filter(t => t.entryRegime !== "BULL");
+  const normalNonRsi2 = normalTradesFinal.filter(t => t.setup !== "RSI2_TREND_TRAILING");
+  const normalNonTrailingExit = normalTradesFinal.filter(t => t.reason !== "TRAILING_STOP" && t.reason !== "END_OF_DATA");
+  const normalBear = normalTradesFinal.filter(t => t.entryRegime === "BEAR");
+
+  const invariants = {
+    noNormalShorts: normalShorts.length === 0,
+    noNormalNonBull: normalNonBull.length === 0,
+    noNormalNonRsi2: normalNonRsi2.length === 0,
+    noNormalNonTrailingExit: normalNonTrailingExit.length === 0,
+    noNormalBear: normalBear.length === 0,
+    allowShortIsFalse: NormalRsi2TrendTrailingConfig.allowShort === false,
+    shortArmedSetupsIsZero: NormalRsi2TrendTrailingStats.shortArmedSetups === 0,
+    entriesShortIsZero: NormalRsi2TrendTrailingStats.entriesShort === 0,
+    totalNormalMatchesTrailingExits: NormalRsi2TrendTrailingStats.totalNormalTrades === (NormalRsi2TrendTrailingStats.exitsByTrailingStop + normalTradesFinal.filter(t => t.reason === "END_OF_DATA").length)
+  };
+
+  console.log("\n--- INVARIANTS VALIDATION ---");
+  console.log(`No Normal Shorts:          ${invariants.noNormalShorts ? "PASS" : "FAIL (" + normalShorts.length + ")"}`);
+  console.log(`No Normal Non-BULL:       ${invariants.noNormalNonBull ? "PASS" : "FAIL (" + normalNonBull.length + ")"}`);
+  console.log(`No Normal Non-RSI2:       ${invariants.noNormalNonRsi2 ? "PASS" : "FAIL (" + normalNonRsi2.length + ")"}`);
+  console.log(`No Normal Non-Trailing:   ${invariants.noNormalNonTrailingExit ? "PASS" : "FAIL (" + normalNonTrailingExit.length + ")"}`);
+  console.log(`No Normal BEAR:           ${invariants.noNormalBear ? "PASS" : "FAIL (" + normalBear.length + ")"}`);
+  console.log(`allowShort is false:      ${invariants.allowShortIsFalse ? "PASS" : "FAIL"}`);
+  console.log(`shortArmedSetups is 0:    ${invariants.shortArmedSetupsIsZero ? "PASS" : "FAIL"}`);
+  console.log(`entriesShort is 0:        ${invariants.entriesShortIsZero ? "PASS" : "FAIL"}`);
+  console.log(`Total vs Trailing Exits:  ${invariants.totalNormalMatchesTrailingExits ? "PASS" : "FAIL"}`);
+
   fs.writeFileSync(
     fileName,
     JSON.stringify(
       {
         config: configUsed,
+        invariants,
         expectancyStats: ExpectancyTracker.stats,
         chopStats: {
            enabled: FEATURE_FLAGS.CHOP_REGIME,

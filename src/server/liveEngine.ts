@@ -211,9 +211,42 @@ export async function initExchange() {
     apiKey: process.env.KRAKEN_API_KEY,
     secret: process.env.KRAKEN_SECRET_KEY,
     enableRateLimit: true,
-    timeout: 10000 // enforce 10s ccxt timeout
+    timeout: 30000 // enforce 30s ccxt timeout
   });
   exchange.setSandboxMode(true); // Ensure all execution goes to https://demo-futures.kraken.com/
+}
+
+function delaySleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function ccxtWithRetry<T>(fn: () => Promise<T>, retries = 3, delay = 3000): Promise<T> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      if (i === retries - 1) throw error;
+      
+      const isTransient = 
+        error instanceof ccxt.NetworkError || 
+        error instanceof ccxt.ExchangeError || 
+        error.message?.includes('Rate limit exceeded') ||
+        error.message?.includes('timeout') ||
+        error.message?.includes('network') ||
+        error.message?.includes('ECONNRESET') ||
+        error.message?.includes('502') ||
+        error.message?.includes('503 Service Unavailable');
+      
+      if (isTransient) {
+        console.warn(`[Retry ${i + 1}/${retries}] CCXT Transient Error: ${error.message}. Retrying in ${delay}ms...`);
+        await delaySleep(delay);
+        delay *= 2; // exponential backoff
+      } else {
+        throw error;
+      }
+    }
+  }
+  throw new Error("Unreachable");
 }
 
 export async function getLiveState(): Promise<LiveState> {
@@ -270,6 +303,8 @@ export async function startPaperTrading() {
     }
 
     if (!state.maxHistoricalEquity) state.maxHistoricalEquity = state.baseBalance || 10000;
+
+    await precomputeLiveOHLCV();
 
     // Serverless-hardened: We no longer run background setTimeouts.
     // The engine state is strictly driven by incoming pings (Dashboard or Cron).
@@ -342,7 +377,7 @@ export async function resetPaperTrading() {
   return state;
 }
 
-const TARGET_SYMBOLS = ['BTC/USD:USD', 'ETH/USD:USD', 'SOL/USD:USD', 'XRP/USD:USD', 'LINK/USD:USD', 'DOGE/USD:USD', 'ADA/USD:USD'];
+const TARGET_SYMBOLS = ['BTC/USD:USD', 'ETH/USD:USD', 'SOL/USD:USD', 'XRP/USD:USD', 'LINK/USD:USD', 'DOGE/USD:USD'];
 
 let lastTickTime = 0;
 const MIN_TICK_INTERVAL_MS = 7500;
@@ -365,6 +400,37 @@ function processOHLCV(ccxtOhlcv: any[]): Bar[] {
         c: c[4],
         v: c[5]
     }));
+}
+
+interface CachedOHLCV {
+  bars1H: Bar[];
+  bars4H: Bar[];
+}
+const liveDataCache: Record<string, CachedOHLCV> = {};
+
+function mergeOHLCV(existing: Bar[], incoming: Bar[]): Bar[] {
+    const map = new Map<string, Bar>();
+    for (const b of existing) map.set(b.t, b);
+    for (const b of incoming) map.set(b.t, b);
+    return Array.from(map.values()).sort((a, b) => new Date(a.t).getTime() - new Date(b.t).getTime());
+}
+
+async function precomputeLiveOHLCV() {
+    console.log("Precomputing OHLCV...");
+    const symbolsToPreload = Array.from(new Set(['BTC/USD:USD', ...TARGET_SYMBOLS]));
+    for (const symbol of symbolsToPreload) {
+        try {
+            console.log(`Downloading ${symbol} [1H/4H]...`);
+            const ohlcv1H = await ccxtWithRetry(() => exchange!.fetchOHLCV(symbol, '1h', undefined, 55));
+            const ohlcv4H = await ccxtWithRetry(() => exchange!.fetchOHLCV(symbol, '4h', undefined, 210));
+            liveDataCache[symbol] = {
+                bars1H: processOHLCV(ohlcv1H),
+                bars4H: processOHLCV(ohlcv4H),
+            };
+        } catch (e: any) {
+            console.error(`Failed to precompute OHLCV for ${symbol}: ${e.message}`);
+        }
+    }
 }
 
 async function loopTick() {
@@ -393,10 +459,20 @@ async function loopTick() {
 
     // Arbitrarily use BTC as the Global Regime Anchor to save Rate Limits
     try {
-        const ohlcv1H = await exchange.fetchOHLCV('BTC/USD:USD', '1h', undefined, 55);
-        btc1H = processOHLCV(ohlcv1H);
-        const ohlcv4H = await exchange.fetchOHLCV('BTC/USD:USD', '4h', undefined, 210);
-        btc4H = processOHLCV(ohlcv4H);
+        if (!liveDataCache['BTC/USD:USD']) {
+            await precomputeLiveOHLCV();
+        }
+        
+        if (!liveDataCache['BTC/USD:USD']) return; // abort tick if still failing
+
+        let ohlcv1H = await ccxtWithRetry(() => exchange.fetchOHLCV('BTC/USD:USD', '1h', undefined, 5));
+        let ohlcv4H = await ccxtWithRetry(() => exchange.fetchOHLCV('BTC/USD:USD', '4h', undefined, 5));
+        
+        liveDataCache['BTC/USD:USD'].bars1H = mergeOHLCV(liveDataCache['BTC/USD:USD'].bars1H, processOHLCV(ohlcv1H)).slice(-55);
+        liveDataCache['BTC/USD:USD'].bars4H = mergeOHLCV(liveDataCache['BTC/USD:USD'].bars4H, processOHLCV(ohlcv4H)).slice(-210);
+        
+        btc1H = liveDataCache['BTC/USD:USD'].bars1H;
+        btc4H = liveDataCache['BTC/USD:USD'].bars4H;
         
         if (btc1H.length > 50 && btc4H.length > 200) {
             globalFeatures = MarketDataLayer.prepareFeatures(btc1H, btc4H);
@@ -407,7 +483,7 @@ async function loopTick() {
         console.error("Failed to parse BTC base regime anchor", e);
     }
 
-    const tickers = await exchange.fetchTickers(TARGET_SYMBOLS);
+    const tickers = await ccxtWithRetry(() => exchange.fetchTickers(TARGET_SYMBOLS));
 
     let totalPnl = 0;
     const FEE_RATE = 0.0005;
@@ -437,7 +513,7 @@ async function loopTick() {
                  const side = p.direction === 'LONG' ? 'sell' : 'buy';
                  try {
                      console.log(`[LIVE EXECUTION] Sending ${side} exit order for ${p.symbol} to Kraken Futures...`);
-                     const order = await exchange.createMarketOrder(p.symbol, side, p.size);
+                     const order = await ccxtWithRetry(() => exchange.createMarketOrder(p.symbol, side, p.size));
                      console.log(`[LIVE EXECUTION] Exit order successful:`, order.id);
                  } catch(e: any) {
                      console.error(`[LIVE EXECUTION] Exit order failed for ${p.symbol}:`, e.message);
@@ -543,10 +619,18 @@ async function loopTick() {
               sym1H = btc1H; sym4H = btc4H;
           } else {
               try {
-                const sOHLCV1H = await exchange.fetchOHLCV(symbol, '1h', undefined, 55);
-                sym1H = processOHLCV(sOHLCV1H);
-                const sOHLCV4H = await exchange.fetchOHLCV(symbol, '4h', undefined, 210);
-                sym4H = processOHLCV(sOHLCV4H);
+                if (!liveDataCache[symbol]) await precomputeLiveOHLCV();
+                
+                if (!liveDataCache[symbol]) continue;
+
+                const sOHLCV1H = await ccxtWithRetry(() => exchange.fetchOHLCV(symbol, '1h', undefined, 5));
+                const sOHLCV4H = await ccxtWithRetry(() => exchange.fetchOHLCV(symbol, '4h', undefined, 5));
+                
+                liveDataCache[symbol].bars1H = mergeOHLCV(liveDataCache[symbol].bars1H, processOHLCV(sOHLCV1H)).slice(-55);
+                liveDataCache[symbol].bars4H = mergeOHLCV(liveDataCache[symbol].bars4H, processOHLCV(sOHLCV4H)).slice(-210);
+                
+                sym1H = liveDataCache[symbol].bars1H;
+                sym4H = liveDataCache[symbol].bars4H;
               } catch(e: any) {
                   console.warn(`[CCXT Info] Failed to fetch OHLCV for ${symbol}: ${e.message}`);
                   continue; 
@@ -584,7 +668,7 @@ async function loopTick() {
                               const side = signal.direction === 'LONG' ? 'buy' : 'sell';
                               try {
                                   // For Kraken Futures, we execute a market order
-                                  const order = await exchange.createMarketOrder(symbol, side, finalSize);
+                                  const order = await ccxtWithRetry(() => exchange.createMarketOrder(symbol, side, finalSize));
                                   console.log(`[LIVE EXECUTION] Order successful:`, order.id);
                                   brokerOrderId = order.id;
                               } catch(e: any) {
