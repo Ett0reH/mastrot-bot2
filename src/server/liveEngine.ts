@@ -213,7 +213,11 @@ export async function initExchange() {
     enableRateLimit: true,
     timeout: 30000 // enforce 30s ccxt timeout
   });
-  exchange.setSandboxMode(true); // Ensure all execution goes to https://demo-futures.kraken.com/
+  try {
+      await ccxtWithRetry(() => exchange.loadMarkets());
+  } catch (e: any) {
+      console.warn("Could not preload markets in initExchange, parsing sizes may vary.", e.message);
+  }
 }
 
 function delaySleep(ms: number) {
@@ -229,7 +233,7 @@ async function ccxtWithRetry<T>(fn: () => Promise<T>, retries = 3, delay = 3000)
       
       const isTransient = 
         error instanceof ccxt.NetworkError || 
-        error instanceof ccxt.ExchangeError || 
+        (error instanceof ccxt.ExchangeError && !error.message.toLowerCase().includes('invalid') && !error.message.toLowerCase().includes('balance') && !error.message.toLowerCase().includes('margin') && !error.message.toLowerCase().includes('position')) || 
         error.message?.includes('Rate limit exceeded') ||
         error.message?.includes('timeout') ||
         error.message?.includes('network') ||
@@ -328,12 +332,19 @@ export async function stopPaperTrading() {
     await loadStatePromise;
   }
   
-  // Base balance doesn't update until trade closes. Wait.
-  // Actually, let's liquidate virtual positions to save the realized profit into base balance
+  await initExchange();
+
   if (state.openPositions && state.openPositions.length > 0) {
     for (const p of state.openPositions) {
-        // We need the current ticker to evaluate PnL. For simplicity on stop, we just keep the base unchanged unless we explicitly fetch.
-        // For accurate tracking, use floating PnL from latest snapshot. 
+        if (process.env.LIVE_TRADING_ENABLED === 'true' && exchange) {
+             const side = p.direction === 'LONG' ? 'sell' : 'buy';
+             try {
+                 console.log(`[LIVE EXECUTION] Sending ${side} exit order for ${p.symbol} on STOP...`);
+                 await ccxtWithRetry(() => exchange.createMarketOrder(p.symbol, side, p.size, undefined, { reduceOnly: true }));
+             } catch (e: any) {
+                 console.error(`[LIVE EXECUTION] Failed to close ${p.symbol} on STOP:`, e.message);
+             }
+        }
     }
   }
   
@@ -352,6 +363,22 @@ export async function resetPaperTrading() {
   if (!initialStateLoaded) {
     if (!loadStatePromise) loadStatePromise = loadInitialState().catch(e => { loadStatePromise = null; throw e; });
     await loadStatePromise;
+  }
+
+  await initExchange();
+
+  if (state.openPositions && state.openPositions.length > 0) {
+    for (const p of state.openPositions) {
+        if (process.env.LIVE_TRADING_ENABLED === 'true' && exchange) {
+             const side = p.direction === 'LONG' ? 'sell' : 'buy';
+             try {
+                 console.log(`[LIVE EXECUTION] Sending ${side} exit order for ${p.symbol} on RESET...`);
+                 await ccxtWithRetry(() => exchange.createMarketOrder(p.symbol, side, p.size, undefined, { reduceOnly: true }));
+             } catch (e: any) {
+                 console.error(`[LIVE EXECUTION] Failed to close ${p.symbol} on RESET:`, e.message);
+             }
+        }
+    }
   }
   
   state = {
@@ -421,8 +448,8 @@ async function precomputeLiveOHLCV() {
     for (const symbol of symbolsToPreload) {
         try {
             console.log(`Downloading ${symbol} [1H/4H]...`);
-            const ohlcv1H = await ccxtWithRetry(() => exchange!.fetchOHLCV(symbol, '1h', undefined, 55));
-            const ohlcv4H = await ccxtWithRetry(() => exchange!.fetchOHLCV(symbol, '4h', undefined, 210));
+            const ohlcv1H = await ccxtWithRetry(() => exchange!.fetchOHLCV(symbol, '1h', undefined, 300));
+            const ohlcv4H = await ccxtWithRetry(() => exchange!.fetchOHLCV(symbol, '4h', undefined, 300));
             liveDataCache[symbol] = {
                 bars1H: processOHLCV(ohlcv1H),
                 bars4H: processOHLCV(ohlcv4H),
@@ -468,8 +495,8 @@ async function loopTick() {
         let ohlcv1H = await ccxtWithRetry(() => exchange.fetchOHLCV('BTC/USD:USD', '1h', undefined, 5));
         let ohlcv4H = await ccxtWithRetry(() => exchange.fetchOHLCV('BTC/USD:USD', '4h', undefined, 5));
         
-        liveDataCache['BTC/USD:USD'].bars1H = mergeOHLCV(liveDataCache['BTC/USD:USD'].bars1H, processOHLCV(ohlcv1H)).slice(-55);
-        liveDataCache['BTC/USD:USD'].bars4H = mergeOHLCV(liveDataCache['BTC/USD:USD'].bars4H, processOHLCV(ohlcv4H)).slice(-210);
+        liveDataCache['BTC/USD:USD'].bars1H = mergeOHLCV(liveDataCache['BTC/USD:USD'].bars1H, processOHLCV(ohlcv1H)).slice(-400);
+        liveDataCache['BTC/USD:USD'].bars4H = mergeOHLCV(liveDataCache['BTC/USD:USD'].bars4H, processOHLCV(ohlcv4H)).slice(-400);
         
         btc1H = liveDataCache['BTC/USD:USD'].bars1H;
         btc4H = liveDataCache['BTC/USD:USD'].bars4H;
@@ -513,11 +540,18 @@ async function loopTick() {
                  const side = p.direction === 'LONG' ? 'sell' : 'buy';
                  try {
                      console.log(`[LIVE EXECUTION] Sending ${side} exit order for ${p.symbol} to Kraken Futures...`);
-                     const order = await ccxtWithRetry(() => exchange.createMarketOrder(p.symbol, side, p.size));
+                     const order = await ccxtWithRetry(() => exchange.createMarketOrder(p.symbol, side, p.size, undefined, { reduceOnly: true }));
                      console.log(`[LIVE EXECUTION] Exit order successful:`, order.id);
                  } catch(e: any) {
                      console.error(`[LIVE EXECUTION] Exit order failed for ${p.symbol}:`, e.message);
                      isLiveExitSuccess = false;
+                     
+                     // If exchange rejects reduceOnly (because position was manually closed or liquidated), force drop it locally
+                     const msg = e.message.toLowerCase();
+                     if (msg.includes('position') || msg.includes('reduce') || msg.includes('balance') || msg.includes('invalid') || msg.includes('margin')) {
+                         console.warn(`[LIVE EXECUTION] Exchange rejected exit. Assuming position already closed/liquidated. Forcing local sync.`);
+                         isLiveExitSuccess = true;
+                     }
                  }
             }
 
@@ -626,8 +660,8 @@ async function loopTick() {
                 const sOHLCV1H = await ccxtWithRetry(() => exchange.fetchOHLCV(symbol, '1h', undefined, 5));
                 const sOHLCV4H = await ccxtWithRetry(() => exchange.fetchOHLCV(symbol, '4h', undefined, 5));
                 
-                liveDataCache[symbol].bars1H = mergeOHLCV(liveDataCache[symbol].bars1H, processOHLCV(sOHLCV1H)).slice(-55);
-                liveDataCache[symbol].bars4H = mergeOHLCV(liveDataCache[symbol].bars4H, processOHLCV(sOHLCV4H)).slice(-210);
+                liveDataCache[symbol].bars1H = mergeOHLCV(liveDataCache[symbol].bars1H, processOHLCV(sOHLCV1H)).slice(-400);
+                liveDataCache[symbol].bars4H = mergeOHLCV(liveDataCache[symbol].bars4H, processOHLCV(sOHLCV4H)).slice(-400);
                 
                 sym1H = liveDataCache[symbol].bars1H;
                 sym4H = liveDataCache[symbol].bars4H;
@@ -639,20 +673,20 @@ async function loopTick() {
           
           if (sym1H.length > 50 && sym4H.length > 200) {
               const features = MarketDataLayer.prepareFeatures(sym1H, sym4H);
-              const signal = SignalLayer.evaluate(features, state.regime as TradingRegime, symbol, { btcTrend1H: globalFeatures?.trend1H, btcRegime: state.regime as TradingRegime });
+              const localRegime = RegimeLayer.detect(features);
+              const signal = SignalLayer.evaluate(features, localRegime as TradingRegime, symbol, { btcTrend1H: globalFeatures?.trend1H, btcRegime: state.regime as TradingRegime });
               
-              if (symbol === 'BTC/USD:USD') {
-                  console.log(`[DATA CHECK] ${symbol} Price: ${features.price}, RSI: ${features.rsi1H ? features.rsi1H.toFixed(2) : 'N/A'}, Regime: ${state.regime}, Signal: ${signal.direction}`);
-              }
+              const displayRegime = symbol === 'BTC/USD:USD' ? state.regime : localRegime;
+              console.log(`[DATA CHECK] ${symbol} Price: ${features.price}, RSI: ${features.rsi1H ? features.rsi1H.toFixed(2) : 'N/A'}, Local Regime: ${displayRegime}, Signal: ${signal.direction}`);
 
               if (signal.direction !== 'NEUTRAL') {
-                  const gate = GatekeeperLayer.allowEntry(signal, features, state.regime as TradingRegime, symbol);
+                  const gate = GatekeeperLayer.allowEntry(signal, features, localRegime as TradingRegime, symbol);
                   if (gate.allowed) {
                       const risk = RiskLayer.calculateRisk(
                           signal, 
                           features, 
                           state.balance, 
-                          state.regime as TradingRegime, 
+                          localRegime as TradingRegime, 
                           gate.riskModifier || 1.0, 
                           symbol, 
                           { btcTrend1H: globalFeatures?.trend1H, btcRegime: state.regime as TradingRegime }
@@ -660,6 +694,11 @@ async function loopTick() {
                       
                       let finalSize = risk.positionSize * capitalHealth.allowedCapacityMultiplier;
                       if (isNaN(finalSize) || !isFinite(finalSize)) finalSize = 0;
+                      if (exchange.markets && exchange.markets[symbol]) {
+                          finalSize = Number(exchange.amountToPrecision(symbol, finalSize));
+                      } else {
+                          finalSize = Math.round(finalSize);
+                      }
                       
                       if (finalSize > 0) {
                           console.log(`[ENTRY LAYER] Open ${symbol} ${signal.direction} at $${features.price}`);
@@ -677,7 +716,24 @@ async function loopTick() {
                                   brokerOrderId = order.id;
                               } catch(e: any) {
                                   console.error(`[LIVE EXECUTION] Order failed for ${symbol}:`, e.message);
-                                  isLiveExecutionSuccess = false;
+                                  
+                                  // ASYNC RECONCILIATION: Check if position actually opened despite the error (Timeout bug fix)
+                                  try {
+                                      console.log(`[LIVE EXECUTION] Attempting to reconcile orphaned position for ${symbol}...`);
+                                      const livePos = await exchange.fetchPositions();
+                                      const orphanedPos = livePos.find((p: any) => p.symbol === symbol && Math.abs(p.contracts || 0) > 0);
+                                      if (orphanedPos) {
+                                          console.log(`[LIVE EXECUTION] ORPHAN RECOVERED: The order succeeded on exchange despite error. Saving to state.`);
+                                          isLiveExecutionSuccess = true;
+                                          brokerOrderId = 'recovered_sync_' + Date.now();
+                                      } else {
+                                          console.log(`[LIVE EXECUTION] CONFIRMED: No position opened on exchange. Order genuinely failed.`);
+                                          isLiveExecutionSuccess = false;
+                                      }
+                                  } catch (syncError: any) {
+                                      console.error(`[LIVE EXECUTION] Sync also failed. Assuming order failed.`, syncError.message);
+                                      isLiveExecutionSuccess = false;
+                                  }
                               }
                           }
 

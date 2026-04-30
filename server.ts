@@ -3,6 +3,7 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import fs from "fs";
+import * as ccxt from "ccxt";
 import { GoogleGenAI, Type } from "@google/genai";
 import { startPaperTrading, stopPaperTrading, getLiveState, triggerCronTick, resetPaperTrading } from "./src/server/liveEngine.js";
 
@@ -114,6 +115,86 @@ async function startServer() {
     try {
       const state = await resetPaperTrading();
       res.json(state);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/emergency-kraken-transfer", async (req, res) => {
+    try {
+      const exchange = new ccxt.krakenfutures({
+        apiKey: process.env.KRAKEN_API_KEY,
+        secret: process.env.KRAKEN_SECRET_KEY,
+        enableRateLimit: true
+      });
+      await exchange.loadMarkets();
+      
+      const logs: string[] = [];
+      logs.push("Starting Emergency Close & Transfer...");
+
+      // 1. Close all open positions on Kraken Futures
+      try {
+          const pos = await exchange.fetchPositions();
+          logs.push(`Found ${pos.length} position objects.`);
+          for (const p of pos) {
+              if (Math.abs(p.contracts || 0) > 0) {
+                  const side = p.contracts > 0 ? 'sell' : 'buy';
+                  logs.push(`Closing orphaned position: ${p.symbol} (${p.contracts}) with ${side}...`);
+                  await exchange.createMarketOrder(p.symbol, side, Math.abs(p.contracts), undefined, { reduceOnly: true });
+                  logs.push(`Successfully closed ${p.symbol}.`);
+              }
+          }
+      } catch (err: any) {
+          logs.push(`Position closing error: ${err.message}`);
+      }
+
+      // 2. Transfer all balances to Holding (cash) 
+      try {
+          logs.push('Fetching account balances...');
+          const response = await exchange.privateGetAccounts();
+          const accounts = response.accounts;
+      
+          for (const accName of Object.keys(accounts)) {
+            const acc = accounts[accName];
+            const type = acc.type;
+            
+            const balances = acc.balances || acc.currencies || {};
+            for (const cur of Object.keys(balances)) {
+              let amount = 0;
+              if (type === 'marginAccount') {
+                 amount = parseFloat(balances[cur] || '0');
+              } else if (type === 'multiCollateralMarginAccount') {
+                 amount = parseFloat(balances[cur].available || balances[cur].quantity || '0');
+              } else if (type === 'cashAccount') {
+                 continue; // already in holding
+              }
+      
+              if (amount > 0) {
+                logs.push(`Found ${amount} ${cur} in ${type} (${accName}). Processing transfer...`);
+                try {
+                   let fromAccount = '';
+                   if (type === 'marginAccount') {
+                       fromAccount = accName; 
+                   } else if (type === 'multiCollateralMarginAccount') {
+                       fromAccount = 'flex';
+                   }
+      
+                   if (fromAccount) {
+                       await exchange.transfer(cur, amount, fromAccount, 'cash');
+                       logs.push(`SUCCESS: Transferred ${amount} ${cur} to Holding Wallet.`);
+                   }
+                } catch(e: any) {
+                   logs.push(`ERROR transferring ${cur}: ${e.message}`);
+                }
+              }
+            }
+          }
+      } catch (err: any) {
+          logs.push(`Transfer error: ${err.message}`);
+      }
+      
+      logs.push("Emergency process complete.");
+      res.json({ success: true, logs });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
