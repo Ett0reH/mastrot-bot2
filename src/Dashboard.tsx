@@ -439,11 +439,11 @@ export default function Dashboard() {
                         <Activity className="w-4 h-4 text-[#10B981]" />
                      </div>
                      <div className="pt-2">
-                        <div className={`text-2xl lg:text-3xl font-bold tracking-tight mb-0.5 font-sans ${liveState?.balance >= 10000 ? 'text-[#10B981]' : liveState?.balance < 10000 ? 'text-[#F43F5E]' : 'text-white'}`}>
-                          {liveState?.balance >= 10000 ? '+' : '-'}${Math.abs((liveState?.balance || 10000) - 10000).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+                        <div className={`text-2xl lg:text-3xl font-bold tracking-tight mb-0.5 font-sans ${liveState?.balance >= (liveState?.initialBalance || 10000) ? 'text-[#10B981]' : liveState?.balance < (liveState?.initialBalance || 10000) ? 'text-[#F43F5E]' : 'text-white'}`}>
+                          {liveState?.balance >= (liveState?.initialBalance || 10000) ? '+' : '-'}${Math.abs((liveState?.balance || (liveState?.initialBalance || 10000)) - (liveState?.initialBalance || 10000)).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
                         </div>
-                        <div className={`text-[11px] font-medium ${(liveState?.balance || 10000) >= 10000 ? 'text-[#10B981]/70' : 'text-[#F43F5E]/70'}`}>
-                          {liveState?.balance >= 10000 ? '+' : ''}{(((liveState?.balance || 10000) - 10000) / 10000 * 100).toFixed(2)}% since start
+                        <div className={`text-[11px] font-medium ${(liveState?.balance || (liveState?.initialBalance || 10000)) >= (liveState?.initialBalance || 10000) ? 'text-[#10B981]/70' : 'text-[#F43F5E]/70'}`}>
+                          {liveState?.balance >= (liveState?.initialBalance || 10000) ? '+' : ''}{(((liveState?.balance || (liveState?.initialBalance || 10000)) - (liveState?.initialBalance || 10000)) / (liveState?.initialBalance || 10000) * 100).toFixed(2)}% since start
                         </div>
                      </div>
                   </div>

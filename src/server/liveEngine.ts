@@ -46,6 +46,7 @@ export interface LiveState {
   equityHistory?: { time: string, equity: number }[];
   metricsHistory?: any[];
   maxHistoricalEquity?: number;
+  initialBalance?: number;
   warmupUntil?: number;
 }
 
@@ -523,11 +524,23 @@ export async function resetPaperTrading() {
     }
   }
   
+  let startingCapital = 10000.00;
+  if (exchange) {
+      try {
+          const realMargin = await exchange.fetchMarginBalance();
+          if (realMargin !== null) {
+              startingCapital = realMargin;
+              console.log(`[RESET] Pulled real start capital $${startingCapital.toFixed(2)} from Kraken.`);
+          }
+      } catch(e) {}
+  }
+  
   state = {
     isActive: false,
     status: 'STOPPED',
-    balance: 10000.00,
-    baseBalance: 10000.00,
+    balance: startingCapital,
+    baseBalance: startingCapital,
+    initialBalance: startingCapital,
     openPositions: [],
     recentTrades: [],
     regime: 'UNKNOWN',
@@ -536,7 +549,7 @@ export async function resetPaperTrading() {
     botSecret: BOT_SECRET,
     equityHistory: [],
     metricsHistory: [],
-    maxHistoricalEquity: 10000.00,
+    maxHistoricalEquity: startingCapital,
     warmupUntil: undefined
   };
   
@@ -766,6 +779,10 @@ async function loopTick() {
                     console.log(`[STATE SYNC] Kraken portfolio is $${realMargin.toFixed(2)}. Updating virtual base balance to $${realBaseBalance.toFixed(2)}`);
                     state.baseBalance = realBaseBalance;
                     newBalance = realMargin;
+                    
+                    if (!state.initialBalance || Math.abs(state.initialBalance - realBaseBalance) > 100) {
+                        state.initialBalance = realBaseBalance;
+                    }
                     
                     // Force chart/history reset if it's wildly different (e.g., initial load)
                     if (state.equityHistory.length > 0 && Math.abs(state.equityHistory[state.equityHistory.length - 1].equity - newBalance) > 100) {
