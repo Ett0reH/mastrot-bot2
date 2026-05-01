@@ -27,7 +27,7 @@ async function checkKraken() {
         console.log("\n1. Testing Authentication / Account Balances");
         const accountsRes = await client.getAccounts();
         console.log("Accounts status:", accountsRes.result === 'success' ? "OK" : "FAILED");
-        const marginAcc = accountsRes.accounts?.marginAccount;
+        const marginAcc = accountsRes.accounts?.marginAccount as any;
         if (marginAcc) {
             console.log("Margin Account Balances:", Object.keys(marginAcc.balances).filter(k => parseFloat(marginAcc.balances[k]) > 0).join(', ') || "None");
         }

@@ -20,7 +20,8 @@ async function transferAll() {
     // We get marginAccount directly as properties according to Siebly Types
     if (accounts?.marginAccount) {
       const type = 'marginAccount';
-      const balances = accounts.marginAccount.balances || {};
+      const marginAcc = accounts.marginAccount as any;
+      const balances = marginAcc.balances || {};
       for (const cur of Object.keys(balances)) {
          let amount = parseFloat(balances[cur] || '0');
          if (amount > 0) {

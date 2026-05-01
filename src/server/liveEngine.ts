@@ -293,6 +293,35 @@ class KrakenExchangeAdapter {
         }));
     }
 
+    async fetchMarginBalance(): Promise<number | null> {
+        try {
+            const res = await ccxtWithRetry(() => this.client.getAccounts(), 3, 2000);
+            
+            if (res.accounts) {
+                // If the user uses Multi-Collateral (Flex) margin account
+                if (res.accounts['flex'] && res.accounts['flex'].type === 'multiCollateralMarginAccount') {
+                    // Use portfolioValue (which includes unrealized PNL) or balanceValue
+                    return res.accounts['flex'].portfolioValue;
+                }
+                
+                // Fallback for single-collateral USD account
+                const usdMarginAcc = Object.values(res.accounts).find((a: any) => a.type === 'marginAccount' && a.currency === 'usd') as any;
+                if (usdMarginAcc && usdMarginAcc.balances) {
+                    let total = 0;
+                    if (usdMarginAcc.balances['usd']) total += parseFloat(usdMarginAcc.balances['usd']);
+                    if (usdMarginAcc.auxiliary && usdMarginAcc.auxiliary.pnl) total += parseFloat(usdMarginAcc.auxiliary.pnl);
+                    return total;
+                }
+            }
+            return null;
+        } catch (e: any) {
+            if (!e.message?.includes('Service Unavailable') && !e.message?.includes('Bad Gateway')) {
+                 console.warn("Failed to fetch Kraken Margin Balance:", e.message);
+            }
+            return null;
+        }
+    }
+
     amountToPrecision(symbol: string, amount: number): string {
         return Math.round(amount).toString();
     }
@@ -721,6 +750,37 @@ async function loopTick() {
     
     let newBalance = (state.baseBalance || 10000.00) + totalPnl;
     if (isNaN(newBalance) || !isFinite(newBalance)) newBalance = state.baseBalance || 10000.00;
+    
+    // SYNC LAYER (Virtual vs Kraken Live / Sandbox)
+    let effectiveRiskBalance = newBalance;
+    if (exchange) {
+        try {
+            const realMargin = await exchange.fetchMarginBalance();
+            if (realMargin !== null) {
+                // realMargin is portfolioValue, which already includes the current unrealized Pnl.
+                // Subtract bot's totalPnl to find the true closed base balance.
+                const realBaseBalance = realMargin - totalPnl;
+                
+                // If we are significantly out of sync with Kraken's wallet balance
+                if (Math.abs((state.baseBalance || 10000.00) - realBaseBalance) > 0.05) {
+                    console.log(`[STATE SYNC] Kraken portfolio is $${realMargin.toFixed(2)}. Updating virtual base balance to $${realBaseBalance.toFixed(2)}`);
+                    state.baseBalance = realBaseBalance;
+                    newBalance = realMargin;
+                    
+                    // Force chart/history reset if it's wildly different (e.g., initial load)
+                    if (state.equityHistory.length > 0 && Math.abs(state.equityHistory[state.equityHistory.length - 1].equity - newBalance) > 100) {
+                        state.equityHistory = [];
+                        state.metricsHistory = [];
+                        state.maxHistoricalEquity = newBalance;
+                    }
+                }
+                effectiveRiskBalance = newBalance;
+            }
+        } catch (e: any) {
+             console.warn("[STATE SYNC] Could not read real Kraken margin, proceeding with virtual equity safely.");
+        }
+    }
+    
     state.balance = newBalance;
     if (state.balance > state.maxHistoricalEquity!) {
         state.maxHistoricalEquity = state.balance;
@@ -801,7 +861,7 @@ async function loopTick() {
                       const risk = RiskLayer.calculateRisk(
                           signal, 
                           features, 
-                          state.balance, 
+                          effectiveRiskBalance, 
                           localRegime as TradingRegime, 
                           gate.riskModifier || 1.0, 
                           symbol, 
