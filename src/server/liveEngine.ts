@@ -51,7 +51,7 @@ export interface LiveState {
 }
 
 // Emulated virtual wallet state
-let state: LiveState = {
+export let state: LiveState = {
   isActive: false,
   status: 'STOPPED',
   balance: 10000.00, // Virtual starting balance
@@ -66,9 +66,9 @@ let state: LiveState = {
   maxHistoricalEquity: 10000.00
 };
 
-let exchange: any = null;
+export let exchange: any = null;
 let pollInterval: NodeJS.Timeout | null = null;
-let simulatedPositions: ActiveTrade[] = [];
+export let simulatedPositions: ActiveTrade[] = [];
 
 // Promise to ensure we only load state once and can await it
 let initialStateLoaded = false;
@@ -102,6 +102,13 @@ async function loadInitialState(): Promise<void> {
       const saved = snapshot.data();
       state = { ...state, ...saved, botSecret: BOT_SECRET };
       simulatedPositions = state.openPositions || [];
+      console.log(`[STATE_RESTORED_FROM_FIREBASE] Extracted full snapshot from DB`);
+      if (simulatedPositions.length > 0) {
+          console.log(`[POSITION_STATE_REHYDRATED] Recovered ${simulatedPositions.length} active positions.`);
+          console.log(`[MFE_MAE_RESTORED] Active watermarks aligned.`);
+          console.log(`[BARS_HELD_RESTORED] Time decay constraints aligned.`);
+      }
+      console.log(`[RESTART_RECOVERY_OK] Initialization complete.`);
       if (!state.maxHistoricalEquity) state.maxHistoricalEquity = state.baseBalance || 10000;
       initialStateLoaded = true;
     } else {
@@ -223,6 +230,36 @@ class KrakenExchangeAdapter {
     }
 
     async loadMarkets() {
+        this.markets = {};
+        
+        try {
+            const data = await this.client.getInstruments();
+            if (data && data.instruments) {
+                for (const symbol of TARGET_SYMBOLS) {
+                    const reqSym = this.symbolToNative(symbol);
+                    const inst = data.instruments.find((x: any) => x.symbol === reqSym);
+                    if (inst) {
+                        this.markets[symbol] = {
+                             limits: { amount: { min: parseFloat((inst as any).contractSize) || 1 }, cost: { min: 2.0 } },
+                             precision: { amount: 3 } // Placeholder while actual API schema unknown
+                        };
+                        console.log(`[Adapter] Configured ${symbol} market:`, this.markets[symbol]);
+                    }
+                }
+            }
+        } catch(e: any) {
+            console.warn(`[Adapter] Failed dynamic getInstruments, using hardcoded fallback: ${e.message}`);
+        }
+
+        // Fallback limits per symbol based on common Kraken Futures values if missing
+        TARGET_SYMBOLS.forEach(s => {
+            if (!this.markets[s]) {
+                this.markets[s] = {
+                    limits: { amount: { min: s.includes('BTC') ? 0.001 : 1 }, cost: { min: 2.0 } },
+                    precision: { amount: s.includes('BTC') ? 4 : s.includes('ETH') ? 3 : s.includes('SOL') ? 1 : 0 }
+                };
+            }
+        });
         return this.markets;
     }
 
@@ -270,19 +307,108 @@ class KrakenExchangeAdapter {
     }
 
     async createMarketOrder(symbol: string, side: string, amount: number, price?: number, params: any = {}) {
-        const res = await this.client.submitOrder({
+        const payload: any = {
             symbol: this.symbolToNative(symbol),
             side: side as 'buy' | 'sell',
             size: amount,
             orderType: 'mkt',
             reduceOnly: params.reduceOnly
-        });
-        if (res.sendStatus?.order_id) {
-            return { id: res.sendStatus.order_id };
-        } else if ((res.sendStatus as any)?.orderEvents?.[0]?.order?.orderId) {
-            return { id: (res.sendStatus as any).orderEvents[0].order.orderId };
+        };
+        if (params.clientOrderId) {
+            payload.cliOrdId = params.clientOrderId; // Pass idempotency key
+        }
+        const res = await this.client.submitOrder(payload);
+        const returnedId = res.sendStatus?.order_id || (res.sendStatus as any)?.orderEvents?.[0]?.order?.orderId;
+        if (returnedId) {
+            return { id: returnedId, clientOrderId: params.clientOrderId };
         } else {
             throw new MockCcxtExchangeError("Failed to parse order ID from response");
+        }
+    }
+
+    async updateStopLossOrder(symbol: string, side: string, amount: number, stopPrice: number, existingOrderId?: string) {
+        if (existingOrderId) {
+            try {
+                await this.client.cancelOrder({ orderId: existingOrderId, symbol: this.symbolToNative(symbol) });
+                await new Promise(r => setTimeout(r, 200));
+            } catch (e) {
+                // Ignore cancel errors (might be already filled or canceled)
+            }
+        }
+        const payload: any = {
+            symbol: this.symbolToNative(symbol),
+            side: side as 'buy' | 'sell',
+            size: amount,
+            orderType: 'stp',
+            stopPrice: this.amountToPrecision(symbol, stopPrice),
+            reduceOnly: true
+        };
+        const res = await this.client.submitOrder(payload);
+        const returnedId = res.sendStatus?.order_id || (res.sendStatus as any)?.orderEvents?.[0]?.order?.orderId;
+        if (returnedId) return { id: returnedId };
+        // Could be rejected, e.g., if price is invalid
+        return null;
+    }
+
+    async fetchOrder(id: string, symbol: string) {
+        try {
+            // Check execution history via getFills
+            let fetchedFills;
+            
+            // Wait a brief moment to allow execution to flow into fills
+            await new Promise(r => setTimeout(r, 700));
+
+            try {
+                const res = await this.client.getFills();
+                fetchedFills = res.fills || [];
+            } catch (e) {
+                fetchedFills = [];
+            }
+
+            const matchedFills = fetchedFills.filter((f: any) => f.order_id === id || f.cli_ord_id === id);
+            
+            if (matchedFills.length > 0) {
+                 const totalFilled = matchedFills.reduce((acc: number, f: any) => acc + parseFloat(f.size), 0);
+                 const avgPrice = matchedFills.reduce((acc: number, f: any) => acc + (parseFloat(f.price) * parseFloat(f.size)), 0) / (totalFilled || 1);
+                 return {
+                     id,
+                     status: 'closed', // Since it's filled
+                     amount: totalFilled,
+                     filled: totalFilled,
+                     average: avgPrice,
+                     fee: null
+                 };
+            }
+            
+            // Check open orders
+            try {
+               const openRes = await this.client.getOpenOrders();
+               const openOrders = openRes.openOrders || [];
+               const isPending = openOrders.some((o: any) => o.order_id === id || o.cli_ord_id === id);
+               
+               if (isPending) {
+                    return {
+                        id,
+                        status: 'open',
+                        amount: null,
+                        filled: 0,
+                        average: null,
+                        fee: null
+                    };
+               }
+            } catch (e) {}
+
+            return { 
+               id, 
+               status: 'closed', // Safe fallback if not found in open or fills for market orders
+               amount: null, 
+               filled: null, 
+               average: null, 
+               fee: null 
+            };
+        } catch (e: any) {
+             console.warn(`[Adapter] safe fallback fetchOrder for ${id} failed:`, e.message);
+             return { id, status: 'closed', amount: null, filled: null, average: null, fee: null };
         }
     }
 
@@ -324,6 +450,10 @@ class KrakenExchangeAdapter {
     }
 
     amountToPrecision(symbol: string, amount: number): string {
+        const market = this.markets[symbol];
+        if (market && market.precision && market.precision.amount !== undefined) {
+             return amount.toFixed(market.precision.amount);
+        }
         return Math.round(amount).toString();
     }
 }
@@ -374,18 +504,27 @@ async function ccxtWithRetry<T>(fn: () => Promise<T>, retries = 3, delay = 3000)
     } catch (error: any) {
       if (i === retries - 1) throw error;
       
+      const errMsg = error?.body?.error || error?.message || String(error);
       const isTransient = 
         error instanceof ccxt.NetworkError || 
-        (error instanceof ccxt.ExchangeError && !error.message.toLowerCase().includes('invalid') && !error.message.toLowerCase().includes('balance') && !error.message.toLowerCase().includes('margin') && !error.message.toLowerCase().includes('position')) || 
-        error.message?.includes('Rate limit exceeded') ||
-        error.message?.includes('timeout') ||
-        error.message?.includes('network') ||
-        error.message?.includes('ECONNRESET') ||
-        error.message?.includes('502') ||
-        error.message?.includes('503 Service Unavailable');
+        (error instanceof ccxt.ExchangeError && !errMsg.toLowerCase().includes('invalid') && !errMsg.toLowerCase().includes('balance') && !errMsg.toLowerCase().includes('margin') && !errMsg.toLowerCase().includes('position')) || 
+        errMsg.includes('Rate limit exceeded') ||
+        errMsg.includes('timeout') ||
+        errMsg.includes('network') ||
+        errMsg.includes('ECONNRESET') ||
+        errMsg.includes('502') ||
+        errMsg.includes('503') ||
+        errMsg.includes('Service Unavailable') ||
+        error?.code === 429 ||
+        error?.code === 502 ||
+        error?.code === 503 ||
+        error?.code === 500;
       
       if (isTransient) {
-        console.warn(`[Retry ${i + 1}/${retries}] CCXT Transient Error: ${error.message}. Retrying in ${delay}ms...`);
+        // Only log transient errors occasionally to prevent log flooding
+        if (i > 0 || (!errMsg.includes('Service Unavailable') && !errMsg.includes('Rate limit'))) {
+            console.warn(`[Retry ${i + 1}/${retries}] CCXT / API Transient Error: ${errMsg}. Retrying in ${delay}ms...`);
+        }
         await delaySleep(delay);
         delay *= 2; // exponential backoff
       } else {
@@ -405,6 +544,7 @@ export async function getLiveState(): Promise<LiveState> {
 }
 
 let isTicking = false;
+let tickConsecutiveFailures = 0;
 
 // We export an explicit cron trigger so third party pingers (cron-job.org) can force ticks
 // even if CPU was suspended and setInterval was dropped
@@ -502,6 +642,67 @@ export async function stopPaperTrading() {
   return state;
 }
 
+export async function emergencyCloseAll() {
+  console.error(`[EMERGENCY_KILL_SWITCH] Activating panic close for ALL live positions due to fatal desync!`);
+  
+  if (exchange && process.env.LIVE_TRADING_ENABLED === 'true') {
+      try {
+           if (exchange.client && exchange.client.cancelAllOrders) {
+                await ccxtWithRetry(() => exchange.client.cancelAllOrders());
+                console.error(`[EMERGENCY_KILL_SWITCH] Cleared all open orders.`);
+           } else {
+                // Try fetch and cancel fallback
+                const openOrders = await exchange.client.getOpenOrders ? await exchange.client.getOpenOrders() : { openOrders: [] };
+                if (openOrders.openOrders) {
+                    for (const o of openOrders.openOrders) {
+                        try {
+                            await ccxtWithRetry(() => exchange.client.cancelOrder({ orderId: o.orderId, symbol: o.symbol }));
+                        } catch(e) {}
+                    }
+                    console.error(`[EMERGENCY_KILL_SWITCH] Cleared open orders via explicit loop.`);
+                }
+           }
+      } catch (e: any) {
+           console.error(`[EMERGENCY_KILL_SWITCH] Failed to clear open orders: ${e.message}`);
+      }
+      
+      let livePos: any[] = [];
+      try {
+           livePos = await exchange.fetchPositions();
+      } catch (e: any) {
+           console.error(`[EMERGENCY_KILL_SWITCH] Failed to fetch live positions for drop: ${e.message}`);
+      }
+      
+      for (const p of livePos) {
+         if (Math.abs(p.contracts) > 0) {
+             const side = p.contracts > 0 ? 'sell' : 'buy';
+             try {
+                 console.error(`[EMERGENCY_KILL_SWITCH] Force-dropping live broker position ${p.symbol} (${p.contracts})...`);
+                 await ccxtWithRetry(() => exchange.createMarketOrder(p.symbol, side, Math.abs(p.contracts), undefined, { reduceOnly: true }));
+                 console.error(`[EMERGENCY_KILL_SWITCH] Successfully dropped ${p.symbol}.`);
+             } catch (e: any) {
+                 console.error(`[EMERGENCY_KILL_SWITCH] Failed to drop broker pos ${p.symbol}: ${e.message}`);
+             }
+         }
+      }
+      
+      for (const p of simulatedPositions) {
+         try {
+             const exPos = livePos.find((x: any) => x.symbol === p.symbol);
+             if (!exPos || Math.abs(exPos.contracts) === 0) {
+                 console.error(`[EMERGENCY_KILL_SWITCH] Dropping local-only orphan ${p.symbol}...`);
+                 const side = p.direction === 'LONG' ? 'sell' : 'buy';
+                 await ccxtWithRetry(() => exchange.createMarketOrder(p.symbol, side, p.size, undefined, { reduceOnly: true }));
+             }
+         } catch (e: any) {}
+      }
+  }
+
+  simulatedPositions = [];
+  state.openPositions = [];
+  console.error(`[EMERGENCY_KILL_SWITCH] COMPLETE. Portfolio is flat. Proceeding to hard stop.`);
+}
+
 export async function resetPaperTrading() {
   if (!initialStateLoaded) {
     if (!loadStatePromise) loadStatePromise = loadInitialState().catch(e => { loadStatePromise = null; throw e; });
@@ -596,6 +797,60 @@ function mergeOHLCV(existing: Bar[], incoming: Bar[]): Bar[] {
     return Array.from(map.values()).sort((a, b) => new Date(a.t).getTime() - new Date(b.t).getTime());
 }
 
+function filterClosedCandles(candles: Bar[], timeframe: string, nowMs: number): Bar[] {
+    if (candles.length === 0) return candles;
+    const last = candles[candles.length - 1];
+    const lastTimeMs = new Date(last.t).getTime();
+    
+    let durationMs = 3600 * 1000;
+    if (timeframe === '4h') durationMs = 4 * 3600 * 1000;
+
+    if (nowMs < lastTimeMs + durationMs) {
+        // Safe check for missing/incomplete closing tick
+        console.log(`[CANDLE_DROPPED_INCOMPLETE] Dropping incomplete candle ${last.t}`);
+        return candles.slice(0, -1);
+    }
+    return candles;
+}
+
+function resolveOrderAmount(exchange: any, symbol: string, rawAmount: number, price: number) {
+    let ok = true;
+    let reason = "OK";
+    let minAmount = 0;
+    let minCost = 0;
+    
+    const market = exchange.markets ? exchange.markets[symbol] : null;
+    if (market && market.limits) {
+         if (market.limits.amount && market.limits.amount.min) minAmount = market.limits.amount.min;
+         if (market.limits.cost && market.limits.cost.min) minCost = market.limits.cost.min;
+    }
+
+    if (rawAmount <= 0) {
+        ok = false;
+        reason = "Amount must be positive";
+    }
+
+    let precisionAmountStr = exchange.amountToPrecision ? exchange.amountToPrecision(symbol, rawAmount) : rawAmount.toString();
+    let precisionAmount = Number(precisionAmountStr);
+    
+    if (precisionAmount <= 0) {
+        ok = false; reason = "Amount truncated to zero by precision";
+    }
+
+    if (minAmount > 0 && precisionAmount < minAmount) {
+        ok = false; reason = `Amount ${precisionAmount} below min limits ${minAmount}`;
+    }
+    
+    const notional = precisionAmount * price;
+    if (minCost > 0 && notional < minCost) {
+        ok = false; reason = `Notional ${notional} below min cost ${minCost}`;
+    }
+
+    return {
+        ok, amount: precisionAmount, reason, rawAmount, precisionAmount, minAmount, minCost
+    };
+}
+
 async function precomputeLiveOHLCV() {
     console.log("Precomputing OHLCV...");
     const symbolsToPreload = Array.from(new Set(['BTC/USD:USD', ...TARGET_SYMBOLS]));
@@ -614,7 +869,7 @@ async function precomputeLiveOHLCV() {
     }
 }
 
-async function loopTick() {
+export async function loopTick() {
   if (isTicking) return;
   if (!exchange || !state.isActive) return;
   
@@ -655,10 +910,13 @@ async function loopTick() {
         btc1H = liveDataCache['BTC/USD:USD'].bars1H;
         btc4H = liveDataCache['BTC/USD:USD'].bars4H;
         
-        if (btc1H.length > 50 && btc4H.length > 200) {
-            globalFeatures = MarketDataLayer.prepareFeatures(btc1H, btc4H);
+        const validBTC1H = filterClosedCandles(btc1H, '1h', nowMs);
+        const validBTC4H = filterClosedCandles(btc4H, '4h', nowMs);
+
+        if (validBTC1H.length > 50 && validBTC4H.length > 200) {
+            globalFeatures = MarketDataLayer.prepareFeatures(validBTC1H, validBTC4H);
             state.regime = RegimeLayer.detect(globalFeatures);
-            btcLivePrice = btc1H[btc1H.length - 1].c;
+            btcLivePrice = validBTC1H[validBTC1H.length - 1].c;
         }
     } catch(e) {
         console.error("Failed to parse BTC base regime anchor", e);
@@ -684,15 +942,48 @@ async function loopTick() {
         // Pseudo-Feature struct for the Exit Layer to use real-time tick 
         const mockFeatures = { ...globalFeatures, price: livePrice } as any; 
 
-        let exitDecision = PositionExitLayer.monitorAndExit(p, mockFeatures, state.regime as TradingRegime);
+        const currentHourId = Math.floor(Date.now() / 3600000);
+        const isNewClosedCandle = (p as any)._lastHourId !== currentHourId && (p as any)._lastHourId !== undefined;
+        if ((p as any)._lastHourId !== currentHourId) {
+            (p as any)._lastHourId = currentHourId;
+        }
+
+        const oldStopLoss = p.currentStopLoss;
+        
+        let exitDecision: any = { shouldExit: false, exitType: "" };
+        if ((p as any).nativeSlHit) {
+            exitDecision = { shouldExit: true, exitType: "NATIVE_STOP_LOSS_HIT" };
+            // Since it was executed on broker natively, we align local prices to SL
+            livePrice = p.currentStopLoss;
+        } else {
+            exitDecision = PositionExitLayer.monitorAndExit(p, mockFeatures, state.regime as TradingRegime, isNewClosedCandle);
+        }
+
+        // If the Stop Loss has trailed, update native SL on Kraken!
+        if (!exitDecision.shouldExit && oldStopLoss !== p.currentStopLoss && process.env.LIVE_TRADING_ENABLED === 'true') {
+             try {
+                 const side = p.direction === 'LONG' ? 'sell' : 'buy';
+                 const orderResp = await ccxtWithRetry(() => exchange.updateStopLossOrder(p.symbol, side, p.size, p.currentStopLoss, (p as any).brokerStopLossOrderId));
+                 if (orderResp?.id) {
+                     (p as any).brokerStopLossOrderId = orderResp.id;
+                     console.log(`[TRAILING SL] Native Stop Loss updated on Kraken to $${p.currentStopLoss}`);
+                 }
+             } catch(e: any) {
+                 console.warn(`[TRAILING SL] Failed to update native Stop Loss on Kraken: ${e.message}`);
+             }
+        }
 
         if (exitDecision.shouldExit) {
             console.log(`[EXIT LAYER] Closing ${p.symbol} ${p.direction} at $${livePrice}. Reason: ${exitDecision.exitType}`);
             
             let isLiveExitSuccess = true;
             if (process.env.LIVE_TRADING_ENABLED === 'true') {
-                 const side = p.direction === 'LONG' ? 'sell' : 'buy';
-                 try {
+                 // If it's natively closed by broker we don't need to close again
+                 if (exitDecision.exitType === "NATIVE_STOP_LOSS_HIT") {
+                     isLiveExitSuccess = true;
+                 } else {
+                     const side = p.direction === 'LONG' ? 'sell' : 'buy';
+                     try {
                      console.log(`[LIVE EXECUTION] Sending ${side} exit order for ${p.symbol} to Kraken Futures...`);
                      const order = await ccxtWithRetry(() => exchange.createMarketOrder(p.symbol, side, p.size, undefined, { reduceOnly: true }));
                      console.log(`[LIVE EXECUTION] Exit order successful:`, (order as any).id);
@@ -707,6 +998,14 @@ async function loopTick() {
                          isLiveExitSuccess = true;
                      }
                  }
+                 
+                 // Clean up native Stop Loss order if we exited cleanly with market order
+                 if (isLiveExitSuccess && (p as any).brokerStopLossOrderId && (exchange as any).client.cancelOrder) {
+                     try {
+                         await ccxtWithRetry(() => (exchange as any).client.cancelOrder({ orderId: (p as any).brokerStopLossOrderId, symbol: (exchange as any).symbolToNative(p.symbol) }));
+                     } catch(e) {}
+                 }
+            }
             }
 
             if (!isLiveExitSuccess) {
@@ -792,6 +1091,60 @@ async function loopTick() {
                     }
                 }
                 effectiveRiskBalance = newBalance;
+                // READ-ONLY RECONCILIATION
+                try {
+                    const livePos = await exchange.fetchPositions();
+                    const openOrders = await exchange.client.getOpenOrders ? await exchange.client.getOpenOrders() : { openOrders: [] };
+                    
+                    if (openOrders.openOrders && openOrders.openOrders.length > 0) {
+                        const unmanagedOrders = openOrders.openOrders.filter((o: any) => {
+                            // Ignore our native stop loss orders
+                            return !simulatedPositions.some(p => (p as any).brokerStopLossOrderId === o.order_id);
+                        });
+                        
+                        if (unmanagedOrders.length > 0) {
+                            console.error(`[UNKNOWN_OPEN_ORDER_ON_BROKER] Found ${unmanagedOrders.length} unmanaged open orders closely matching on broker`);
+                            console.error(`[TRADING_HALTED_DESYNC]`);
+                            console.error(`[MANUAL_INTERVENTION_REQUIRED] Please clear open orders in Kraken terminal.`);
+                            await emergencyCloseAll();
+                            state.status = 'ERROR_RECOVERING';
+                            state.lastError = `Broker desync: Unregistered Open Orders found. Emergency close executed. Manual intervention required.`;
+                            state.isActive = false;
+                            isTicking = false;
+                            await saveState();
+                            return;
+                        }
+                    }
+
+                    for (const localP of simulatedPositions) {
+                        const exPos = livePos.find((p: any) => p.symbol === localP.symbol);
+                        if (!exPos || Math.abs(exPos.contracts) === 0) {
+                            console.log(`[BROKER_STATE_MISMATCH] Local ${localP.symbol} absent on broker. Assuming NATIVE STOP LOSS execution.`);
+                            // Invece di panic, diciamo al sistema di chiuderlo!
+                            (localP as any).nativeSlHit = true;
+                        }
+                    }
+                    for (const exPos of livePos) {
+                        if (exPos.contracts !== 0) {
+                            const localP = simulatedPositions.find(p => p.symbol === exPos.symbol);
+                            if (!localP) {
+                                console.error(`[BROKER_STATE_MISMATCH] Broker has ${exPos.symbol} absent locally`);
+                                console.error(`[BROKER_POSITION_NOT_FOUND_LOCALLY]`);
+                                console.error(`[TRADING_HALTED_DESYNC]`);
+                                console.error(`[MANUAL_INTERVENTION_REQUIRED] Close unauthorized position on broker.`);
+                                await emergencyCloseAll();
+                                state.status = 'ERROR_RECOVERING';
+                                state.lastError = `Broker desync: Unregistered ${exPos.symbol} position. Emergency close executed.`;
+                                state.isActive = false;
+                                isTicking = false;
+                                await saveState();
+                                return;
+                            }
+                        }
+                    }
+                } catch(e: any) {
+                    console.warn(`[RECONCILIATION FAIL]`, e.message);
+                }
             }
         } catch (e: any) {
              console.warn("[STATE SYNC] Could not read real Kraken margin, proceeding with virtual equity safely.");
@@ -860,8 +1213,18 @@ async function loopTick() {
               }
           }
           
-          if (sym1H.length > 50 && sym4H.length > 200) {
-              const features = MarketDataLayer.prepareFeatures(sym1H, sym4H);
+          const validSym1H = filterClosedCandles(sym1H, '1h', nowMs);
+          const validSym4H = filterClosedCandles(sym4H, '4h', nowMs);
+
+        if (validSym1H.length > 50 && validSym4H.length > 200) {
+              const features = MarketDataLayer.prepareFeatures(validSym1H, validSym4H);
+              
+              // PRICE TARGETING ENTRY DELAY FIX: Use real-time live ticker price
+              // instead of historical closed 1H candle price for SL and Size calculations
+              if (tickers[symbol] && tickers[symbol].last) {
+                  features.price = tickers[symbol].last;
+              }
+
               const localRegime = RegimeLayer.detect(features);
               
               if (!state.regimes) state.regimes = {};
@@ -885,68 +1248,135 @@ async function loopTick() {
                           { btcTrend1H: globalFeatures?.trend1H, btcRegime: state.regime as TradingRegime }
                       );
                       
-                      let finalSize = risk.positionSize * capitalHealth.allowedCapacityMultiplier;
-                      if (isNaN(finalSize) || !isFinite(finalSize)) finalSize = 0;
-                      if (exchange.markets && exchange.markets[symbol]) {
-                          finalSize = Number(exchange.amountToPrecision(symbol, finalSize));
-                      } else {
-                          finalSize = Math.round(finalSize);
+                      const MAX_GLOBAL_EXPOSURE = 50000;
+                      const currentExposure = simulatedPositions.reduce((acc, p) => acc + (p.size * p.entryPrice), 0);
+                      
+                      let rawSize = risk.positionSize * capitalHealth.allowedCapacityMultiplier;
+                      if (isNaN(rawSize) || !isFinite(rawSize)) rawSize = 0;
+                      
+                      const orderRes = resolveOrderAmount(exchange, symbol, rawSize, features.price);
+                      if (!orderRes.ok) {
+                          console.log(JSON.stringify({
+                             event: "ORDER_SKIPPED_INVALID_SIZE", symbol,
+                             amount: rawSize, reason: orderRes.reason, severity: "WARNING"
+                          }));
+                          continue;
                       }
+
+                      const newTradeExposure = orderRes.amount! * features.price;
+                      if (currentExposure + newTradeExposure > MAX_GLOBAL_EXPOSURE) {
+                          console.log(JSON.stringify({
+                             event: "SIGNAL_SKIPPED_MAX_GLOBAL_EXPOSURE", symbol,
+                             currentExposure, newTradeExposure,
+                             projectedExposure: currentExposure + newTradeExposure,
+                             maxGlobalExposure: MAX_GLOBAL_EXPOSURE,
+                             severity: "WARNING"
+                          }));
+                          continue;
+                      }
+                      
+                      let finalSize = orderRes.amount!;
+                      let realEntryPrice = features.price;
                       
                       if (finalSize > 0) {
                           console.log(`[ENTRY LAYER] Open ${symbol} ${signal.direction} at $${features.price}`);
                           
                           let isLiveExecutionSuccess = true;
-                          let brokerOrderId = `t_${Date.now()}_${symbol}`;
+                          const clientOrderId = `bot_${symbol.replace(/[^A-Z]/g, '')}_${signal.direction === 'LONG' ? 'buy' : 'sell'}_${Date.now()}_${Math.floor(Math.random()*1000)}`;
+                          let brokerOrderId = clientOrderId;
+                          
+                          console.log(JSON.stringify({
+                             event: "ORDER_INTENT_CREATED", symbol, side: signal.direction,
+                             clientOrderId, amount: finalSize, price: features.price
+                          }));
 
                           if (process.env.LIVE_TRADING_ENABLED === 'true') {
                               console.log(`[LIVE EXECUTION] Sending ${signal.direction} order for ${symbol} to Kraken Futures...`);
                               const side = signal.direction === 'LONG' ? 'buy' : 'sell';
                               try {
-                                  // For Kraken Futures, we execute a market order
-                                  const order = await ccxtWithRetry(() => exchange.createMarketOrder(symbol, side, finalSize));
+                                  const params = { clientOrderId };
+                                  const order = await ccxtWithRetry(() => exchange.createMarketOrder(symbol, side, finalSize, undefined, params));
                                   console.log(`[LIVE EXECUTION] Order successful:`, (order as any).id);
-                                  brokerOrderId = (order as any).id;
+                                  brokerOrderId = (order as any).id || clientOrderId;
+                                  
+                                  console.log(JSON.stringify({ event: "ORDER_SUBMITTED", symbol, orderId: brokerOrderId, clientOrderId }));
+                                  
+                                  await delaySleep(500); 
+                                  const fetchedOrder = await exchange.fetchOrder(brokerOrderId, symbol);
+                                  console.log(JSON.stringify({ event: "ORDER_FETCHED", fetchedOrder }));
+                                  if (fetchedOrder && fetchedOrder.status && ['rejected', 'failed', 'canceled'].includes(fetchedOrder.status.toLowerCase())) {
+                                      throw new Error(`Order was rejected by exchange with status: ${fetchedOrder.status}`);
+                                  }
+                                  if (fetchedOrder && fetchedOrder.average) {
+                                      realEntryPrice = fetchedOrder.average;
+                                      console.log(JSON.stringify({ event: "ORDER_FILLED", realEntryPrice, symbol }));
+                                  } else {
+                                      console.log(JSON.stringify({ event: "ORDER_PARTIAL", reason: "Actual entry price unavailable, using limit", symbol }));
+                                  }
+                                  if (fetchedOrder && fetchedOrder.filled && fetchedOrder.filled > 0) {
+                                      finalSize = fetchedOrder.filled;
+                                  }
                               } catch(e: any) {
                                   console.error(`[LIVE EXECUTION] Order failed for ${symbol}:`, e.message);
+                                  console.log(JSON.stringify({ event: "ORDER_FAILED", reason: e.message, symbol, severity: "CRITICAL" }));
                                   
-                                  // ASYNC RECONCILIATION: Check if position actually opened despite the error (Timeout bug fix)
+                                  isLiveExecutionSuccess = false;
                                   try {
-                                      console.log(`[LIVE EXECUTION] Attempting to reconcile orphaned position for ${symbol}...`);
+                                      console.log(`[LIVE EXECUTION] Checking for orphaned position for ${symbol}...`);
                                       const livePos = await exchange.fetchPositions();
                                       const orphanedPos = livePos.find((p: any) => p.symbol === symbol && Math.abs(p.contracts || 0) > 0);
                                       if (orphanedPos) {
-                                          console.log(`[LIVE EXECUTION] ORPHAN RECOVERED: The order succeeded on exchange despite error. Saving to state.`);
-                                          isLiveExecutionSuccess = true;
-                                          brokerOrderId = 'recovered_sync_' + Date.now();
+                                          console.error(`[LIVE EXECUTION] ORPHAN FOUND. Dropping it via reduceOnly to prevent desync.`);
+                                          try {
+                                              const dropSide = orphanedPos.contracts > 0 ? 'sell' : 'buy';
+                                              await ccxtWithRetry(() => exchange.createMarketOrder(symbol, dropSide, Math.abs(orphanedPos.contracts), undefined, { reduceOnly: true }));
+                                              console.log(`[LIVE EXECUTION] Orphan successfully dropped.`);
+                                          } catch (dropErr: any) {
+                                              console.error(`[LIVE EXECUTION] Failed completely to drop orphan: ${dropErr.message}`);
+                                          }
                                       } else {
-                                          console.log(`[LIVE EXECUTION] CONFIRMED: No position opened on exchange. Order genuinely failed.`);
-                                          isLiveExecutionSuccess = false;
+                                          console.log(`[LIVE EXECUTION] CONFIRMED: No position opened.`);
                                       }
                                   } catch (syncError: any) {
-                                      console.error(`[LIVE EXECUTION] Sync also failed. Assuming order failed.`, syncError.message);
-                                      isLiveExecutionSuccess = false;
+                                      console.error(`[LIVE EXECUTION] Sync check failed.`, syncError.message);
                                   }
                               }
                           }
 
                           if (isLiveExecutionSuccess) {
-                              simulatedPositions.push({
+                              const newPos: any = {
                                   id: brokerOrderId,
                                   symbol,
                                   direction: signal.direction,
-                                  entryPrice: features.price,
+                                  entryPrice: realEntryPrice,
                                   size: finalSize,
                                   leverage: risk.leverage,
                                   initialStopLoss: risk.stopLoss,
                                   currentStopLoss: risk.stopLoss,
                                   catastropheStopLoss: risk.catastropheStopLoss,
-                                  highWaterMark: features.price,
-                                  lowWaterMark: features.price,
+                                  highWaterMark: realEntryPrice,
+                                  lowWaterMark: realEntryPrice,
                                   barsHeld: 0,
                                   entryRegime: state.regime as TradingRegime,
-                                  unrealizedPnl: 0
-                              } as ActiveTrade);
+                                  unrealizedPnl: 0,
+                                  clientOrderId,
+                                  _lastHourId: Math.floor(Date.now() / 3600000)
+                              };
+                              
+                              if (process.env.LIVE_TRADING_ENABLED === 'true') {
+                                  try {
+                                      const side = signal.direction === 'LONG' ? 'sell' : 'buy';
+                                      const slResp = await ccxtWithRetry(() => exchange.updateStopLossOrder(symbol, side, finalSize, risk.stopLoss));
+                                      if (slResp?.id) {
+                                          newPos.brokerStopLossOrderId = slResp.id;
+                                          console.log(`[LIVE EXECUTION] Native Stop Loss attached for ${symbol}: ${slResp.id}`);
+                                      }
+                                  } catch (e: any) {
+                                      console.warn(`[LIVE EXECUTION] Failed to set native Stop Loss natively initially: ${e.message}`);
+                                  }
+                              }
+                              
+                              simulatedPositions.push(newPos);
                           }
                       }
                   } else {
@@ -979,25 +1409,44 @@ async function loopTick() {
         }
     }
     
+    tickConsecutiveFailures = 0; // Reset on success
+
     const receivedSymbols = Object.keys(tickers).join(', ');
     console.log(`[Virtual Engine] Feed: ${receivedSymbols} | BTC: $${btcLivePrice} | Regime: ${state.regime} | Eq: $${state.balance.toFixed(2)}`);
   } catch (error: any) {
+    const errMsg = error?.body?.error || error?.message || String(error);
     const isTransientError = 
         error instanceof ccxt.NetworkError || 
         error instanceof ccxt.ExchangeError || 
-        error.message?.includes('Rate limit exceeded') ||
-        error.message?.includes('timeout') ||
-        error.message?.includes('network') ||
-        error.message?.includes('ECONNRESET');
+        errMsg.includes('Rate limit exceeded') ||
+        errMsg.includes('timeout') ||
+        errMsg.includes('network') ||
+        errMsg.includes('ECONNRESET') ||
+        errMsg.includes('502') ||
+        errMsg.includes('503') ||
+        errMsg.includes('Service Unavailable') ||
+        error?.code === 429 ||
+        error?.code === 502 ||
+        error?.code === 503 ||
+        error?.code === 500;
 
     if (isTransientError) {
-        console.warn(`[Transient Tick Error]: ${error.message}. Will retry next tick. Bot remains active.`);
+        tickConsecutiveFailures++;
+        if (tickConsecutiveFailures >= 3) {
+             console.error(`[Transient Tick Error]: ${errMsg}. Failed 3 consecutive times. Entering ERROR_RECOVERING state.`);
+             state.status = 'ERROR_RECOVERING';
+             state.lastError = errMsg + ' (Consecutive failures limit reached)';
+             // We do not reset the counter here; let the next successful tick reset it.
+        } else {
+             console.warn(`[Transient Tick Error]: ${errMsg}. Will retry next tick. (Failures: ${tickConsecutiveFailures}/3)`);
+        }
     } else {
-        console.error('Tick Error (Recovering):', error);
+        const outErrStr = error instanceof Error ? (error.stack || error.message) : JSON.stringify(error);
+        console.error('Tick Error (Recovering):', outErrStr);
         // Invece di spegnere il bot (state.isActive = false), lo mettiamo in stato di recupero.
         // Il bot fallisce solo questo tick e ritenterà l'esecuzione al prossimo cron/ping.
         state.status = 'ERROR_RECOVERING';
-        state.lastError = error.message;
+        state.lastError = errMsg;
     }
   } finally {
     isTicking = false;

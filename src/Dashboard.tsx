@@ -371,6 +371,41 @@ export default function Dashboard() {
           </div>
         </header>
 
+        {/* Emergency Halt Warning banner */}
+        {liveState?.status === 'ERROR_RECOVERING' && (
+          <div className="bg-red-500/10 border-b border-red-500/30 p-4 md:px-8 flex-shrink-0 relative overflow-hidden backdrop-blur-md">
+            <div className="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjgiPgo8cmVjdCB3aWR0aD0iOCIgaGVpZ2h0PSI4IiBmaWxsPSIjZmZmIiBmaWxsLW9wYWNpdHk9IjAuMDIiLz4KPC9zdmc+')] opacity-20 pointer-events-none mix-blend-overlay"></div>
+            <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-center gap-4">
+                <div className="relative flex items-center justify-center w-10 h-10 rounded-full bg-red-500/20 border border-red-500/40">
+                   <Shield className="text-red-500 w-5 h-5" />
+                   <div className="absolute inset-0 rounded-full border border-red-500 animate-ping opacity-30"></div>
+                </div>
+                <div>
+                  <h3 className="text-red-500 font-bold uppercase tracking-widest text-[13px] flex items-center gap-2 mb-0.5">
+                     SISTEMA FERMATO IN EMERGENZA
+                  </h3>
+                  <p className="text-red-400/80 text-[11px] font-mono tracking-wide leading-tight">{liveState?.lastError || 'Desync rilevato o errore irreversibile. Posizioni chiuse e trading sospeso per sicurezza.'}</p>
+                </div>
+              </div>
+              <div className="flex gap-3">
+                 <button 
+                   onClick={handleResetLive}
+                   className="bg-[#1A1C22] hover:bg-red-500/10 text-red-400 border border-red-500/30 px-5 py-2 font-mono text-[10px] rounded transition-colors uppercase tracking-widest font-bold whitespace-nowrap"
+                 >
+                   {resetConfirm ? 'Confermi Reset?' : 'RESET GLOBALE'}
+                 </button>
+                 <button 
+                   onClick={handleStartLive}
+                   className="bg-red-500 hover:bg-red-600 text-white shadow-[0_0_15px_rgba(239,68,68,0.3)] shadow-red-500/20 border border-red-500 px-5 py-2 font-mono text-[10px] rounded transition-all uppercase tracking-widest font-bold whitespace-nowrap"
+                 >
+                   RIAVVIA TRADING
+                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         <main className="flex-1 overflow-y-auto custom-scrollbar p-4 md:p-6 lg:p-8 pb-20">
           <AnimatePresence mode="wait">
             {activeTab === 'live' ? (
@@ -460,7 +495,7 @@ export default function Dashboard() {
                      </div>
                      <div className="flex items-baseline gap-2 pt-2">
                         <div className="text-[#3B82F6] text-2xl font-bold tracking-tight font-sans">
-                          {liveState?.balance >= 10000 ? '+' : ''}{(((liveState?.balance || 10000) - 10000) / 10000 * 100).toFixed(2)}%
+                          {liveState?.balance >= (liveState?.initialBalance || 10000) ? '+' : ''}{(((liveState?.balance || 10000) - (liveState?.initialBalance || 10000)) / (liveState?.initialBalance || 10000) * 100).toFixed(2)}%
                         </div>
                         <div className="text-white/40 text-[10px] font-sans font-medium tracking-wide">
                           Current Session

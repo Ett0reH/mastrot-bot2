@@ -982,8 +982,11 @@ export class PositionExitLayer {
     trade: ActiveTrade,
     features: ReturnType<typeof MarketDataLayer.prepareFeatures>,
     currentRegime: TradingRegime,
+    isNewClosedCandle: boolean = true
   ): { shouldExit: boolean; exitType: ExitReason } {
-    trade.barsHeld++;
+    if (isNewClosedCandle) {
+        trade.barsHeld++;
+    }
 
     trade.highWaterMark = Math.max(trade.highWaterMark, features.price);
     trade.lowWaterMark = Math.min(trade.lowWaterMark, features.price);
