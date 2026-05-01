@@ -13,6 +13,42 @@ async function startServer() {
 
   app.use(express.json());
 
+  app.get("/api/debug-kraken", async (req, res) => {
+    try {
+      const exchange = new ccxt.krakenfutures({
+        apiKey: process.env.KRAKEN_API_KEY,
+        secret: process.env.KRAKEN_SECRET_KEY,
+      });
+      await exchange.loadMarkets();
+      
+      const p = 0.105;
+      const targetAlloc = 500;
+      const sizeDoge = targetAlloc / p;
+      const finalDoge = Number(exchange.amountToPrecision('DOGE/USD:USD', sizeDoge));
+      
+      const pBtc = 76000;
+      const sizeBtc = targetAlloc / pBtc;
+      let finalBtc = 0;
+      try {
+        finalBtc = Number(exchange.amountToPrecision('BTC/USD:USD', sizeBtc));
+      } catch(e) {}
+      
+      let reqDoge = null;
+      try {
+        reqDoge = exchange.createOrderRequest('DOGE/USD:USD', 'market', 'buy', finalDoge);
+      } catch(e) {}
+      
+      res.json({
+        finalDoge,
+        reqDoge,
+        finalBtc,
+        targetAlloc
+      });
+    } catch (e: any) {
+      res.json({ error: e.message });
+    }
+  });
+
   // In-memory mock state for the bot
   let systemState = {
     session: "HEALTHY",
@@ -127,6 +163,9 @@ async function startServer() {
         secret: process.env.KRAKEN_SECRET_KEY,
         enableRateLimit: true
       });
+      if (process.env.KRAKEN_SANDBOX === 'true' || process.env.KRAKEN_SANDBOX === undefined) {
+        exchange.setSandboxMode(true);
+      }
       await exchange.loadMarkets();
       
       const logs: string[] = [];
@@ -180,8 +219,11 @@ async function startServer() {
                    }
       
                    if (fromAccount) {
-                       await exchange.transfer(cur, amount, fromAccount, 'cash');
-                       logs.push(`SUCCESS: Transferred ${amount} ${cur} to Holding Wallet.`);
+                       let code = String(cur).toUpperCase();
+                       if (code === 'XBT') code = 'BTC';
+
+                       await exchange.transfer(code, amount, fromAccount, 'cash');
+                       logs.push(`SUCCESS: Transferred ${amount} ${code} to Holding Wallet.`);
                    }
                 } catch(e: any) {
                    logs.push(`ERROR transferring ${cur}: ${e.message}`);

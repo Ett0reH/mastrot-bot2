@@ -8,6 +8,9 @@ async function transferAll() {
     secret: process.env.KRAKEN_SECRET_KEY,
     enableRateLimit: true
   });
+  if (process.env.KRAKEN_SANDBOX === 'true' || process.env.KRAKEN_SANDBOX === undefined) {
+    exchange.setSandboxMode(true);
+  }
 
   try {
     await exchange.loadMarkets();
@@ -47,9 +50,12 @@ async function transferAll() {
              }
 
              if (fromAccount) {
-                 console.log(`Transferring ${amount} ${cur} from ${fromAccount} to cash`);
-                 await exchange.transfer(cur, amount, fromAccount, 'cash');
-                 console.log(`Transfer of ${cur} successful.`);
+                 let code = String(cur).toUpperCase();
+                 if (code === 'XBT') code = 'BTC';
+
+                 console.log(`Transferring ${amount} ${code} from ${fromAccount} to cash`);
+                 await exchange.transfer(code, amount, fromAccount, 'cash');
+                 console.log(`Transfer of ${code} successful.`);
              }
           } catch(e: any) {
              console.error(`Failed to transfer ${cur}: ${e.message}`);

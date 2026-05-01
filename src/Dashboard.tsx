@@ -503,16 +503,32 @@ export default function Dashboard() {
                   </div>
 
                   {/* Regime */}
-                  <div className="col-span-2 md:col-span-1 border border-white/5 bg-[#1A1C22]/80 backdrop-blur-md rounded-lg p-5 flex flex-col justify-between min-h-[130px]">
-                     <div className="flex justify-between items-start text-[10px] font-sans font-bold tracking-widest text-white/50 uppercase">
-                        <span>Current Cycle Regime</span>
+                  <div className="col-span-2 md:col-span-1 border border-white/5 bg-[#1A1C22]/80 backdrop-blur-md rounded-lg p-5 flex flex-col min-h-[130px]">
+                     <div className="flex justify-between items-start text-[10px] font-sans font-bold tracking-widest text-white/50 uppercase mb-2">
+                        <span>Current Cycle Regimes</span>
                         <Hexagon className="w-4 h-4 text-[#10B981] opacity-70" />
                      </div>
-                     <div className="pt-2">
-                        <div className={`text-2xl font-bold tracking-tight mb-0.5 font-sans uppercase ${liveState?.regime === 'BULL' || liveState?.regime === 'EUPHORIA' ? 'text-[#10B981]' : liveState?.regime === 'BEAR' || liveState?.regime === 'CRASH' ? 'text-[#F43F5E]' : 'text-[#3B82F6]'}`}>
-                          {liveState?.regime || 'UNKNOWN'}
+                     <div className="flex-1 overflow-y-auto custom-scrollbar pr-1">
+                        {/* Global Regime */}
+                        <div className="flex justify-between items-center mb-1 bg-white/5 px-2 py-1 rounded">
+                           <span className="text-[10px] text-white/50 font-bold uppercase">GLOBAL (BTC)</span>
+                           <span className={`text-[11px] font-bold tracking-tight font-sans uppercase ${liveState?.regime === 'BULL' || liveState?.regime === 'EUPHORIA' ? 'text-[#10B981]' : liveState?.regime === 'BEAR' || liveState?.regime === 'CRASH' ? 'text-[#F43F5E]' : 'text-[#3B82F6]'}`}>
+                              {liveState?.regime || 'UNKNOWN'}
+                           </span>
                         </div>
-                        <div className="text-white/40 text-[11px] font-sans">High Volatility</div>
+                        {/* Local Regimes */}
+                        {liveState?.regimes && Object.entries(liveState.regimes).map(([sym, reg]: [string, any]) => {
+                           const symParts = sym.split('/');
+                           const displaySym = symParts[0] || sym;
+                           return (
+                             <div key={sym} className="flex justify-between items-center mb-1 px-2 py-1 border-b border-white/5 last:border-0">
+                                <span className="text-[10px] text-white/40 font-bold">{displaySym}</span>
+                                <span className={`text-[10px] font-semibold tracking-tight uppercase ${reg === 'BULL' || reg === 'EUPHORIA' ? 'text-[#10B981]/80' : reg === 'BEAR' || reg === 'CRASH' ? 'text-[#F43F5E]/80' : 'text-[#3B82F6]/80'}`}>
+                                   {reg || 'UNKNOWN'}
+                                </span>
+                             </div>
+                           );
+                        })}
                      </div>
                   </div>
                 </div>
