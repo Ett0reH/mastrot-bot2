@@ -191,6 +191,113 @@ export async function saveState() {
   }
 }
 
+const TARGET_SYMBOLS = ['BTC/USD:USD', 'ETH/USD:USD', 'SOL/USD:USD', 'XRP/USD:USD', 'LINK/USD:USD', 'DOGE/USD:USD'];
+
+import { DerivativesClient } from '@siebly/kraken-api';
+
+class MockCcxtNetworkError extends Error {}
+class MockCcxtExchangeError extends Error {}
+
+class KrakenExchangeAdapter {
+    private client: DerivativesClient;
+    public markets: Record<string, any> = {};
+
+    constructor(config: { apiKey?: string, secret?: string }) {
+       this.client = new DerivativesClient({
+           apiKey: config.apiKey,
+           apiSecret: config.secret,
+           strictParamValidation: true,
+           testnet: process.env.KRAKEN_SANDBOX === 'true' || process.env.KRAKEN_SANDBOX === undefined
+       });
+       TARGET_SYMBOLS.forEach(s => this.markets[s] = true);
+    }
+
+    setSandboxMode(isSandbox: boolean) {
+        this.client = new DerivativesClient({
+            apiKey: process.env.KRAKEN_API_KEY,
+            apiSecret: process.env.KRAKEN_SECRET_KEY,
+            strictParamValidation: true,
+            testnet: isSandbox
+        });
+    }
+
+    async loadMarkets() {
+        return this.markets;
+    }
+
+    private symbolToNative(symbol: string) {
+        let base = symbol.split('/')[0];
+        if (base === 'BTC') base = 'XBT';
+        return `PF_${base}USD`;
+    }
+
+    private nativeToSymbol(native: string) {
+        let base = native.replace('PF_', '').replace('USD', '');
+        if (base === 'XBT') base = 'BTC';
+        return `${base}/USD:USD`;
+    }
+
+    async fetchTicker(symbol: string) {
+        const { tickers } = await this.client.getTickers();
+        const nativeSymbol = this.symbolToNative(symbol);
+        const t = tickers?.find((x: any) => x.symbol === nativeSymbol);
+        if (!t) throw new MockCcxtExchangeError(`Ticker not found for ${symbol}`);
+        return { symbol, last: t.last, bid: t.bid, ask: t.ask };
+    }
+
+    async fetchTickers(symbols: string[]) {
+        const { tickers } = await this.client.getTickers();
+        let res: Record<string, any> = {};
+        for (const s of symbols) {
+            const nativeSymbol = this.symbolToNative(s);
+            const t = tickers?.find((x: any) => x.symbol === nativeSymbol);
+            if (t) res[s] = { symbol: s, last: t.last, bid: t.bid, ask: t.ask };
+        }
+        return res;
+    }
+
+    async fetchOHLCV(symbol: string, timeframe: string, since?: number, limit: number = 300) {
+        const res = await this.client.getCandles({
+            tickType: 'trade', 
+            symbol: this.symbolToNative(symbol),
+            resolution: timeframe as any
+        });
+        let arr = res.candles.map((c: any) => [
+            c.time, parseFloat(c.open), parseFloat(c.high), parseFloat(c.low), parseFloat(c.close), parseFloat(c.volume)
+        ]);
+        return arr.slice(-limit);
+    }
+
+    async createMarketOrder(symbol: string, side: string, amount: number, price?: number, params: any = {}) {
+        const res = await this.client.submitOrder({
+            symbol: this.symbolToNative(symbol),
+            side: side as 'buy' | 'sell',
+            size: amount,
+            orderType: 'mkt',
+            reduceOnly: params.reduceOnly
+        });
+        if (res.sendStatus?.order_id) {
+            return { id: res.sendStatus.order_id };
+        } else if ((res.sendStatus as any)?.orderEvents?.[0]?.order?.orderId) {
+            return { id: (res.sendStatus as any).orderEvents[0].order.orderId };
+        } else {
+            throw new MockCcxtExchangeError("Failed to parse order ID from response");
+        }
+    }
+
+    async fetchPositions() {
+        const { openPositions } = await this.client.getOpenPositions();
+        return (openPositions || []).map((p: any) => ({
+            symbol: this.nativeToSymbol(p.symbol),
+            contracts: p.size, 
+        }));
+    }
+
+    amountToPrecision(symbol: string, amount: number): string {
+        return Math.round(amount).toString();
+    }
+}
+
 export async function initExchange() {
   if (exchange) return;
 
@@ -209,11 +316,9 @@ export async function initExchange() {
   }
 
   // Initialize Kraken Futures connection for live market data
-  exchange = new ccxt.krakenfutures({
+  exchange = new KrakenExchangeAdapter({
     apiKey: process.env.KRAKEN_API_KEY,
-    secret: process.env.KRAKEN_SECRET_KEY,
-    enableRateLimit: true,
-    timeout: 30000 // enforce 30s ccxt timeout
+    secret: process.env.KRAKEN_SECRET_KEY
   });
   if (process.env.KRAKEN_SANDBOX === 'true' || process.env.KRAKEN_SANDBOX === undefined) {
     console.log("TEST ENVIRONMENT: Enabling Kraken Sandbox mode");
@@ -412,8 +517,6 @@ export async function resetPaperTrading() {
   await saveState();
   return state;
 }
-
-const TARGET_SYMBOLS = ['BTC/USD:USD', 'ETH/USD:USD', 'SOL/USD:USD', 'XRP/USD:USD', 'LINK/USD:USD', 'DOGE/USD:USD'];
 
 let lastTickTime = 0;
 const MIN_TICK_INTERVAL_MS = 7500;
