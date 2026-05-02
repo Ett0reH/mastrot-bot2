@@ -554,7 +554,7 @@ function delaySleep(ms: number) {
 async function ccxtWithRetry<T>(fn: () => Promise<T>, retries = 3, delay = 3000): Promise<T> {
   for (let i = 0; i < retries; i++) {
     try {
-      return await fn();
+      return await withTimeout(fn(), 30000, 'CCXT API Call');
     } catch (error: any) {
       if (i === retries - 1) throw error;
       
@@ -909,10 +909,14 @@ async function precomputeLiveOHLCV() {
     console.log("Precomputing OHLCV...");
     const symbolsToPreload = Array.from(new Set(['BTC/USD:USD', ...TARGET_SYMBOLS]));
     for (const symbol of symbolsToPreload) {
+        if (liveDataCache[symbol]) continue; // Skip if already precomputed
+        
         try {
             console.log(`Downloading ${symbol} [1H/4H]...`);
-            const ohlcv1H = await ccxtWithRetry(() => exchange!.fetchOHLCV(symbol, '1h', undefined, 300));
-            const ohlcv4H = await ccxtWithRetry(() => exchange!.fetchOHLCV(symbol, '4h', undefined, 300));
+            const ohlcv1H = await ccxtWithRetry(() => exchange!.fetchOHLCV(symbol, '1h', undefined, 400));
+            await delaySleep(500);
+            const ohlcv4H = await ccxtWithRetry(() => exchange!.fetchOHLCV(symbol, '4h', undefined, 400));
+            await delaySleep(500);
             liveDataCache[symbol] = {
                 bars1H: processOHLCV(ohlcv1H as any[]),
                 bars4H: processOHLCV(ohlcv4H as any[]),
@@ -924,11 +928,18 @@ async function precomputeLiveOHLCV() {
 }
 
 export async function loopTick() {
-  if (isTicking) return;
+  const nowMs = Date.now();
+  if (isTicking) {
+      if (nowMs - lastTickTime > 120000) {
+          console.warn("[DEADLOCK BREAKER] isTicking was true for >120s. Forcing unlock.");
+          isTicking = false;
+      } else {
+          return;
+      }
+  }
   if (!exchange || !state.isActive) return;
   
   // Wait explicitly if we ticked recently to prevent loop overloads
-  const nowMs = Date.now();
   if (nowMs - lastTickTime < 5000) return;
 
   isTicking = true;
@@ -955,11 +966,25 @@ export async function loopTick() {
         
         if (!liveDataCache['BTC/USD:USD']) return; // abort tick if still failing
 
-        let ohlcv1H = await ccxtWithRetry(() => exchange.fetchOHLCV('BTC/USD:USD', '1h', undefined, 5));
-        let ohlcv4H = await ccxtWithRetry(() => exchange.fetchOHLCV('BTC/USD:USD', '4h', undefined, 5));
+        let needsBTC1H = false;
+        let needsBTC4H = false;
         
-        liveDataCache['BTC/USD:USD'].bars1H = mergeOHLCV(liveDataCache['BTC/USD:USD'].bars1H, processOHLCV(ohlcv1H as any[])).slice(-400);
-        liveDataCache['BTC/USD:USD'].bars4H = mergeOHLCV(liveDataCache['BTC/USD:USD'].bars4H, processOHLCV(ohlcv4H as any[])).slice(-400);
+        const lastBTC1H = liveDataCache['BTC/USD:USD'].bars1H[liveDataCache['BTC/USD:USD'].bars1H.length - 1];
+        if (!lastBTC1H || nowMs >= new Date(lastBTC1H.t).getTime() + 3600 * 1000) needsBTC1H = true;
+
+        const lastBTC4H = liveDataCache['BTC/USD:USD'].bars4H[liveDataCache['BTC/USD:USD'].bars4H.length - 1];
+        if (!lastBTC4H || nowMs >= new Date(lastBTC4H.t).getTime() + 4 * 3600 * 1000) needsBTC4H = true;
+
+        if (needsBTC1H) {
+            let ohlcv1H = await ccxtWithRetry(() => exchange!.fetchOHLCV('BTC/USD:USD', '1h', undefined, 5));
+            liveDataCache['BTC/USD:USD'].bars1H = mergeOHLCV(liveDataCache['BTC/USD:USD'].bars1H, processOHLCV(ohlcv1H as any[])).slice(-400);
+            await delaySleep(200);
+        }
+        if (needsBTC4H) {
+            let ohlcv4H = await ccxtWithRetry(() => exchange!.fetchOHLCV('BTC/USD:USD', '4h', undefined, 5));
+            liveDataCache['BTC/USD:USD'].bars4H = mergeOHLCV(liveDataCache['BTC/USD:USD'].bars4H, processOHLCV(ohlcv4H as any[])).slice(-400);
+            await delaySleep(200);
+        }
         
         btc1H = liveDataCache['BTC/USD:USD'].bars1H;
         btc4H = liveDataCache['BTC/USD:USD'].bars4H;
@@ -1250,11 +1275,25 @@ export async function loopTick() {
                 
                 if (!liveDataCache[symbol]) continue;
 
-                const sOHLCV1H = await ccxtWithRetry(() => exchange.fetchOHLCV(symbol, '1h', undefined, 5));
-                const sOHLCV4H = await ccxtWithRetry(() => exchange.fetchOHLCV(symbol, '4h', undefined, 5));
+                let needs1H = false;
+                let needs4H = false;
                 
-                liveDataCache[symbol].bars1H = mergeOHLCV(liveDataCache[symbol].bars1H, processOHLCV(sOHLCV1H as any[])).slice(-400);
-                liveDataCache[symbol].bars4H = mergeOHLCV(liveDataCache[symbol].bars4H, processOHLCV(sOHLCV4H as any[])).slice(-400);
+                const last1H = liveDataCache[symbol].bars1H[liveDataCache[symbol].bars1H.length - 1];
+                if (!last1H || nowMs >= new Date(last1H.t).getTime() + 3600 * 1000) needs1H = true;
+
+                const last4H = liveDataCache[symbol].bars4H[liveDataCache[symbol].bars4H.length - 1];
+                if (!last4H || nowMs >= new Date(last4H.t).getTime() + 4 * 3600 * 1000) needs4H = true;
+
+                if (needs1H) {
+                    const sOHLCV1H = await ccxtWithRetry(() => exchange!.fetchOHLCV(symbol, '1h', undefined, 5));
+                    liveDataCache[symbol].bars1H = mergeOHLCV(liveDataCache[symbol].bars1H, processOHLCV(sOHLCV1H as any[])).slice(-400);
+                    await delaySleep(200);
+                }
+                if (needs4H) {
+                    const sOHLCV4H = await ccxtWithRetry(() => exchange!.fetchOHLCV(symbol, '4h', undefined, 5));
+                    liveDataCache[symbol].bars4H = mergeOHLCV(liveDataCache[symbol].bars4H, processOHLCV(sOHLCV4H as any[])).slice(-400);
+                    await delaySleep(200);
+                }
                 
                 sym1H = liveDataCache[symbol].bars1H;
                 sym4H = liveDataCache[symbol].bars4H;
@@ -1461,6 +1500,10 @@ export async function loopTick() {
     }
     
     tickConsecutiveFailures = 0; // Reset on success
+    if (state.status === 'ERROR_RECOVERING') {
+        state.status = 'ACTIVE';
+        state.lastError = undefined;
+    }
 
     const receivedSymbols = Object.keys(tickers).join(', ');
     console.log(`[Virtual Engine] Feed: ${receivedSymbols} | BTC: $${btcLivePrice} | Regime: ${state.regime} | Eq: $${state.balance.toFixed(2)}`);
