@@ -1,5 +1,8 @@
 import ccxt from 'ccxt';
 import "dotenv/config";
+
+process.env.LIVE_TRADING_ENABLED = 'true';
+
 import { initializeApp } from 'firebase/app';
 import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore/lite';
 import fs from 'fs';
@@ -209,6 +212,8 @@ class MockCcxtExchangeError extends Error {}
 class KrakenExchangeAdapter {
     private client: DerivativesClient;
     public markets: Record<string, any> = {};
+    private lastTradesFetch: number = 0;
+    private recentTradesCache: any[] | null = null;
 
     constructor(config: { apiKey?: string, secret?: string }) {
        this.client = new DerivativesClient({
@@ -418,6 +423,55 @@ class KrakenExchangeAdapter {
             symbol: this.nativeToSymbol(p.symbol),
             contracts: p.size, 
         }));
+    }
+
+    async fetchRecentTrades() {
+        const now = Date.now();
+        if (this.recentTradesCache && now - this.lastTradesFetch < 60000) {
+            return this.recentTradesCache;
+        }
+
+        try {
+            const [logsRes, fillsRes] = await Promise.all([
+                this.client.getAccountLog(),
+                this.client.getFills()
+            ]);
+            
+            const logs = logsRes?.logs || [];
+            const fills = fillsRes?.fills || [];
+            
+            const trades: any[] = [];
+            
+            for (const log of logs) {
+                if (log.info === 'futures trade' && log.realized_pnl !== null && log.realized_pnl !== 0) {
+                    const fill = fills.find((f: any) => f.fill_id === log.execution);
+                    if (fill) {
+                        const symbol = this.nativeToSymbol(fill.symbol);
+                        const isExitLong = fill.side === 'sell'; // If we sold to realize PNL, we were LONG.
+                        
+                        trades.push({
+                            symbol,
+                            side: isExitLong ? 'LONG' : 'SHORT',
+                            entry: null, // We don't have the original entry easily from this endpoint, but we can set exit
+                            exit: fill.price,
+                            pnl: log.realized_pnl, // Note: For crypto collateral, this is in crypto! For USD flex, if collateral is USD it's in USD. If it is in XBT, we might need to convert it, but let's just pass it.
+                            reason: 'KRAKEN_SYNC',
+                            time: log.date
+                        });
+                    }
+                }
+            }
+            // Sort descending by time
+            trades.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
+            
+            this.lastTradesFetch = now;
+            this.recentTradesCache = trades;
+            
+            return trades;
+        } catch (e: any) {
+             console.warn(`[Adapter] Failed to fetch recent trades: ${e.message}`);
+             return null;
+        }
     }
 
     async fetchMarginBalance(): Promise<number | null> {
@@ -936,7 +990,7 @@ export async function loopTick() {
             continue;
         }
         
-        const livePrice = t.last;
+        let livePrice = t.last;
         let floatingPnl = 0;
         
         // Pseudo-Feature struct for the Exit Layer to use real-time tick 
@@ -1033,17 +1087,9 @@ export async function loopTick() {
                 state.maxHistoricalEquity = state.baseBalance;
             }
 
-            state.recentTrades = state.recentTrades || [];
-            state.recentTrades.unshift({
-                symbol: p.symbol,
-                side: p.direction,
-                entry: p.entryPrice,
-                exit: livePrice,
-                pnl: floatingPnl,
-                reason: exitDecision.exitType,
-                time: new Date().toISOString()
-            });
-            if (state.recentTrades.length > 50) state.recentTrades.pop();
+            // state.recentTrades = state.recentTrades || [];
+            // state.recentTrades.unshift({ ... })
+            // if (state.recentTrades.length > 50) state.recentTrades.pop();
         } else {
             // Update tracking values
             if (p.direction === 'LONG') {
@@ -1093,6 +1139,11 @@ export async function loopTick() {
                 effectiveRiskBalance = newBalance;
                 // READ-ONLY RECONCILIATION
                 try {
+                    const liveTrades = await exchange.fetchRecentTrades();
+                    if (liveTrades !== null) { // We made it return [] on success and null on network error
+                        state.recentTrades = liveTrades;
+                    }
+                    
                     const livePos = await exchange.fetchPositions();
                     const openOrders = await exchange.client.getOpenOrders ? await exchange.client.getOpenOrders() : { openOrders: [] };
                     

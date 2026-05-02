@@ -700,6 +700,59 @@ export default function Dashboard() {
                   </div>
                 </div>
 
+                {/* Recent Trades Table */}
+                <div className="border border-white/5 bg-[#1A1C22]/80 backdrop-blur-md rounded-lg overflow-hidden flex flex-col mt-2">
+                  <div className="px-6 py-4 border-b border-white/5 flex items-center justify-between">
+                    <span className="font-bold text-xs tracking-widest uppercase text-white/90 font-sans">Trade History</span>
+                    <span className="text-[10px] tracking-widest text-white/40 font-sans uppercase">
+                      LAST 50 TRADES
+                    </span>
+                  </div>
+                  <div className="p-0 overflow-x-auto max-h-[400px] overflow-y-auto custom-scrollbar">
+                    {(!liveState?.recentTrades || liveState.recentTrades.length === 0) ? (
+                      <div className="p-16 flex flex-col items-center justify-center text-white/20 font-sans text-sm">
+                         No recent trades found
+                      </div>
+                    ) : (
+                      <table className="w-full text-left font-sans text-[11px] whitespace-nowrap">
+                        <thead className="text-white/30 text-[10px] font-bold tracking-widest border-b border-white/5 sticky top-0 bg-[#1A1C22]">
+                          <tr>
+                            <th className="px-6 py-4 font-normal uppercase">Time</th>
+                            <th className="px-6 py-4 font-normal uppercase">Symbol</th>
+                            <th className="px-6 py-4 font-normal uppercase">Side</th>
+                            <th className="px-6 py-4 font-normal uppercase">Entry Price</th>
+                            <th className="px-6 py-4 font-normal uppercase">Exit Price</th>
+                            <th className="px-6 py-4 font-normal uppercase">Reason</th>
+                            <th className="px-6 py-4 font-normal uppercase text-right">Realized PNL</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {liveState.recentTrades.map((t: any, i: number) => {
+                            const isLong = t.side === 'LONG';
+                            const isWin = t.pnl > 0;
+                            return (
+                            <tr key={i} className="border-b border-white/5 hover:bg-white/[0.02] transition-colors">
+                              <td className="px-6 py-5 text-white/50">{new Date(t.time).toLocaleString([], { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</td>
+                              <td className="px-6 py-5 text-white/90 font-semibold">{t.symbol.replace('/','-')}</td>
+                              <td className="px-6 py-5">
+                                  <span className={`px-2 py-1 rounded border text-[9px] tracking-widest uppercase font-bold ${isLong ? 'bg-transparent text-[#10B981] border-[#10B981]/50' : 'bg-transparent text-[#F43F5E] border-[#F43F5E]/50'}`}>
+                                     {t.side}
+                                  </span>
+                              </td>
+                              <td className="px-6 py-5 text-white/70 font-medium">${t.entry?.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}</td>
+                              <td className="px-6 py-5 text-white/70 font-medium">${t.exit?.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}</td>
+                              <td className="px-6 py-5 text-white/50 text-[9px] tracking-wider uppercase">{t.reason}</td>
+                              <td className={`px-6 py-5 text-right font-bold tracking-tight ${isWin ? 'text-[#10B981]' : 'text-[#F43F5E]'}`}>
+                                {isWin ? '+' : '-'}${Math.abs(t.pnl || 0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}
+                              </td>
+                            </tr>
+                          )})}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                </div>
+
               </motion.div>
             ) : (
                             <motion.div 
