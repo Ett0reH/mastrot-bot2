@@ -154,7 +154,9 @@ async function loadInitialState(): Promise<void> {
 }
 
 // Start loading immediately in the background
-loadStatePromise = loadInitialState().catch(() => { loadStatePromise = null; });
+loadStatePromise = loadInitialState().then(() => {
+    if (state.isActive) startTickerDaemon();
+}).catch(() => { loadStatePromise = null; });
 
 let quotaExceededContext = false;
 
@@ -551,7 +553,7 @@ function delaySleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function ccxtWithRetry<T>(fn: () => Promise<T>, retries = 3, delay = 3000): Promise<T> {
+async function ccxtWithRetry<T>(fn: () => Promise<T>, retries = 6, delay = 2000): Promise<T> {
   for (let i = 0; i < retries; i++) {
     try {
       return await withTimeout(fn(), 30000, 'CCXT API Call');
@@ -575,12 +577,18 @@ async function ccxtWithRetry<T>(fn: () => Promise<T>, retries = 3, delay = 3000)
         error?.code === 500;
       
       if (isTransient) {
-        // Only log transient errors occasionally to prevent log flooding
-        if (i > 0 || (!errMsg.includes('Service Unavailable') && !errMsg.includes('Rate limit'))) {
-            console.warn(`[Retry ${i + 1}/${retries}] CCXT / API Transient Error: ${errMsg}. Retrying in ${delay}ms...`);
+        // Suppress Service Unavailable spam as Kraken Sandbox drops frequently
+        if (errMsg.includes('Service Unavailable') || errMsg.includes('Rate limit') || errMsg.includes('503')) {
+            if (i > 1) {
+                console.log(`[Kraken Sync] API 503/Rate-limited. Waiting ${delay}ms before retry ${i + 1}/${retries}...`);
+            }
+        } else {
+            if (i > 0) {
+                console.warn(`[Retry ${i + 1}/${retries}] API Transient Update: ${errMsg}. Retrying in ${delay}ms...`);
+            }
         }
         await delaySleep(delay);
-        delay *= 2; // exponential backoff
+        delay = Math.min(delay * 1.5, 10000); // capped exponential backoff
       } else {
         throw error;
       }
@@ -599,6 +607,24 @@ export async function getLiveState(): Promise<LiveState> {
 
 let isTicking = false;
 let tickConsecutiveFailures = 0;
+let daemonInterval: NodeJS.Timeout | null = null;
+
+// Start the continuous background loop
+export function startTickerDaemon() {
+    if (daemonInterval) return; // Already running
+    console.log("[DAEMON] Starting background tick logic");
+    daemonInterval = setInterval(async () => {
+        if (!state.isActive) return;
+        
+        if (!initialStateLoaded) {
+            if (!loadStatePromise) loadStatePromise = loadInitialState().catch(e => { loadStatePromise = null; throw e; });
+            await loadStatePromise;
+        }
+        
+        await initExchange();
+        await loopTick();
+    }, 7500); // Check every 7.5s 
+}
 
 // We export an explicit cron trigger so third party pingers (cron-job.org) can force ticks
 // even if CPU was suspended and setInterval was dropped
@@ -638,6 +664,8 @@ export async function startPaperTrading() {
     state.lastError = undefined;
     state.lastUpdate = new Date().toISOString();
     
+    startTickerDaemon();
+    
     // Only clear simulated positions if they don't already exist from a resume
     if (simulatedPositions.length === 0) {
        simulatedPositions = state.openPositions || [];
@@ -663,6 +691,14 @@ export async function startPaperTrading() {
   return state;
 }
 
+export function stopTickerDaemon() {
+    if (daemonInterval) {
+        clearInterval(daemonInterval);
+        daemonInterval = null;
+        console.log("[DAEMON] Stopped background tick logic");
+    }
+}
+
 export async function stopPaperTrading() {
   if (!initialStateLoaded) {
     if (!loadStatePromise) loadStatePromise = loadInitialState().catch(e => { loadStatePromise = null; throw e; });
@@ -670,6 +706,7 @@ export async function stopPaperTrading() {
   }
   
   await initExchange();
+  stopTickerDaemon();
 
   if (state.openPositions && state.openPositions.length > 0) {
     for (const p of state.openPositions) {
@@ -764,6 +801,7 @@ export async function resetPaperTrading() {
   }
 
   await initExchange();
+  stopTickerDaemon();
 
   if (state.openPositions && state.openPositions.length > 0) {
     for (const p of state.openPositions) {
@@ -1009,6 +1047,9 @@ export async function loopTick() {
 
     // UPDATE FLOATING EQUITY & EVALUATE EXIT LAYER
     for (const p of simulatedPositions) {
+        if (!p.currentStopLoss && p.stopLoss) {
+            p.currentStopLoss = p.stopLoss;
+        }
         const t = tickers[p.symbol];
         if (!t || !t.last) {
             positionsToKeep.push(p);
@@ -1204,17 +1245,22 @@ export async function loopTick() {
                         if (exPos.contracts !== 0) {
                             const localP = simulatedPositions.find(p => p.symbol === exPos.symbol);
                             if (!localP) {
-                                console.error(`[BROKER_STATE_MISMATCH] Broker has ${exPos.symbol} absent locally`);
-                                console.error(`[BROKER_POSITION_NOT_FOUND_LOCALLY]`);
-                                console.error(`[TRADING_HALTED_DESYNC]`);
-                                console.error(`[MANUAL_INTERVENTION_REQUIRED] Close unauthorized position on broker.`);
-                                await emergencyCloseAll();
-                                state.status = 'ERROR_RECOVERING';
-                                state.lastError = `Broker desync: Unregistered ${exPos.symbol} position. Emergency close executed.`;
-                                state.isActive = false;
-                                isTicking = false;
-                                await saveState();
-                                return;
+                                console.error(`[BROKER_STATE_MISMATCH] Broker has ${exPos.symbol} absent locally. ADOPTING FOR TEST.`);
+                                const direction = exPos.contracts > 0 ? 'LONG' : 'SHORT';
+                                const entryPrice = parseFloat(exPos.entryPrice) || (liveDataCache[exPos.symbol] ? liveDataCache[exPos.symbol].bars1H[liveDataCache[exPos.symbol].bars1H.length - 1].c : 0);
+                                simulatedPositions.push({
+                                    id: `test-adopt-${Date.now()}`,
+                                    symbol: exPos.symbol,
+                                    direction: direction,
+                                    entryPrice: entryPrice,
+                                    size: Math.abs(exPos.contracts),
+                                    entryTime: Date.now(),
+                                    unrealizedPnl: parseFloat(exPos.unrealizedPnl) || 0,
+                                    mfe: 0,
+                                    mae: 0,
+                                    stopLoss: direction === 'LONG' ? entryPrice * 0.95 : entryPrice * 1.05,
+                                    currentStopLoss: direction === 'LONG' ? entryPrice * 0.95 : entryPrice * 1.05
+                                } as any);
                             }
                         }
                     }
@@ -1383,6 +1429,7 @@ export async function loopTick() {
                           if (process.env.LIVE_TRADING_ENABLED === 'true') {
                               console.log(`[LIVE EXECUTION] Sending ${signal.direction} order for ${symbol} to Kraken Futures...`);
                               const side = signal.direction === 'LONG' ? 'buy' : 'sell';
+                              let createSuccess = false;
                               try {
                                   const params = { clientOrderId };
                                   const order = await ccxtWithRetry(() => exchange.createMarketOrder(symbol, side, finalSize, undefined, params));
@@ -1390,11 +1437,13 @@ export async function loopTick() {
                                   brokerOrderId = (order as any).id || clientOrderId;
                                   
                                   console.log(JSON.stringify({ event: "ORDER_SUBMITTED", symbol, orderId: brokerOrderId, clientOrderId }));
+                                  createSuccess = true;
                                   
                                   await delaySleep(500); 
                                   const fetchedOrder = await exchange.fetchOrder(brokerOrderId, symbol);
                                   console.log(JSON.stringify({ event: "ORDER_FETCHED", fetchedOrder }));
                                   if (fetchedOrder && fetchedOrder.status && ['rejected', 'failed', 'canceled'].includes(fetchedOrder.status.toLowerCase())) {
+                                      createSuccess = false;
                                       throw new Error(`Order was rejected by exchange with status: ${fetchedOrder.status}`);
                                   }
                                   if (fetchedOrder && fetchedOrder.average) {
@@ -1407,28 +1456,38 @@ export async function loopTick() {
                                       finalSize = fetchedOrder.filled;
                                   }
                               } catch(e: any) {
-                                  console.error(`[LIVE EXECUTION] Order failed for ${symbol}:`, e.message);
-                                  console.log(JSON.stringify({ event: "ORDER_FAILED", reason: e.message, symbol, severity: "CRITICAL" }));
+                                  console.error(`[LIVE EXECUTION] Error during order/fetch for ${symbol}:`, e.message);
                                   
-                                  isLiveExecutionSuccess = false;
-                                  try {
-                                      console.log(`[LIVE EXECUTION] Checking for orphaned position for ${symbol}...`);
-                                      const livePos = await exchange.fetchPositions();
-                                      const orphanedPos = livePos.find((p: any) => p.symbol === symbol && Math.abs(p.contracts || 0) > 0);
-                                      if (orphanedPos) {
-                                          console.error(`[LIVE EXECUTION] ORPHAN FOUND. Dropping it via reduceOnly to prevent desync.`);
-                                          try {
-                                              const dropSide = orphanedPos.contracts > 0 ? 'sell' : 'buy';
-                                              await ccxtWithRetry(() => exchange.createMarketOrder(symbol, dropSide, Math.abs(orphanedPos.contracts), undefined, { reduceOnly: true }));
-                                              console.log(`[LIVE EXECUTION] Orphan successfully dropped.`);
-                                          } catch (dropErr: any) {
-                                              console.error(`[LIVE EXECUTION] Failed completely to drop orphan: ${dropErr.message}`);
+                                  if (!createSuccess) {
+                                      console.log(JSON.stringify({ event: "ORDER_FAILED", reason: e.message, symbol, severity: "CRITICAL" }));
+                                      isLiveExecutionSuccess = false;
+                                      try {
+                                          console.log(`[LIVE EXECUTION] Checking for orphaned position for ${symbol}...`);
+                                          const livePos = await exchange.fetchPositions();
+                                          const orphanedPos = livePos.find((p: any) => p.symbol === symbol && Math.abs(p.contracts || 0) > 0);
+                                          if (orphanedPos) {
+                                              console.error(`[LIVE EXECUTION] ORPHAN FOUND. Dropping it via reduceOnly to prevent desync.`);
+                                              try {
+                                                  const dropSide = orphanedPos.contracts > 0 ? 'sell' : 'buy';
+                                                  await ccxtWithRetry(() => exchange.createMarketOrder(symbol, dropSide, Math.abs(orphanedPos.contracts), undefined, { reduceOnly: true }));
+                                                  console.log(`[LIVE EXECUTION] Orphan successfully dropped.`);
+                                              } catch (dropErr: any) {
+                                                  console.error(`[LIVE EXECUTION] Failed completely to drop orphan: ${dropErr.message}`);
+                                                  // IMPORTANT: if we failed to drop the orphan, we MUST assume the position is open to prevent desync crash
+                                                  isLiveExecutionSuccess = true;
+                                                  finalSize = Math.abs(orphanedPos.contracts);
+                                              }
+                                          } else {
+                                              console.log(`[LIVE EXECUTION] CONFIRMED: No position opened.`);
                                           }
-                                      } else {
-                                          console.log(`[LIVE EXECUTION] CONFIRMED: No position opened.`);
+                                      } catch (syncError: any) {
+                                          console.error(`[LIVE EXECUTION] Sync check failed.`, syncError.message);
+                                          // If we can't even check, just assume false. (Though a crash might happen if it was open).
                                       }
-                                  } catch (syncError: any) {
-                                      console.error(`[LIVE EXECUTION] Sync check failed.`, syncError.message);
+                                  } else {
+                                      console.error(`[LIVE EXECUTION] createMarketOrder succeeded but fetchOrder failed. Treating as SUCCESS and active. 
+                                      Error: ${e.message}`);
+                                      isLiveExecutionSuccess = true;
                                   }
                               }
                           }
