@@ -843,6 +843,8 @@ export class RiskLayer {
     positionSize: number;
     leverage: number;
     stopLoss: number;
+    takeProfit: number;
+    tierLabel: string;
     catastropheStopLoss: number;
     maxExposureAllowed: boolean;
     isReducedLeverageAction?: boolean; // Report if leverage was reduced
@@ -932,10 +934,16 @@ export class RiskLayer {
     // Account for Quality
     targetAlloc = targetAlloc * signal.quality; // Lower quality = lower size
 
+    const tpDist = slDist * 3; // 3:1 RR default
+    const takeProfit = signal.direction === "LONG" ? features.price + tpDist : features.price - tpDist;
+    const tierLabel = leverage >= 5 ? "T1_AGGRESSIVE" : leverage >= 3 ? "T2_MODERATE" : "T3_CONSERVATIVE";
+
     return {
       positionSize: targetAlloc / features.price,
       leverage,
       stopLoss,
+      takeProfit,
+      tierLabel,
       catastropheStopLoss,
       maxExposureAllowed: true,
       isReducedLeverageAction
@@ -952,6 +960,8 @@ export interface ActiveTrade {
   entryPrice: number;
   size: number;
   leverage: number;
+  stopLoss: number;
+  takeProfit?: number;
   initialStopLoss: number;
   currentStopLoss: number;
   catastropheStopLoss: number; // 15% hard physical fall-back stop
@@ -975,6 +985,12 @@ export interface ActiveTrade {
   barsToHalfR?: number;
   barsToOneR?: number;
   tierLabel?: string;
+  status?: string;
+  entryTime?: number;
+  riskTier?: string;
+  brokerStopLossOrderId?: string;
+  mfe?: number;
+  mae?: number;
 }
 
 export class PositionExitLayer {

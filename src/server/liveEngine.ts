@@ -8,10 +8,15 @@ import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore/lite';
 import fs from 'fs';
 import path from 'path';
 import { calculateSnapshot } from '../lib/metricsCalculator';
+import { 
+  IntentStatus, OrderIntent, FillRecord, PositionLedgerEntry 
+} from '../lib/ledgerTypes';
 import {
     Bar, TradingRegime, MarketDataLayer, RegimeLayer, SignalLayer,
-    GatekeeperLayer, RiskLayer, PositionExitLayer, ActiveTrade, CapitalManagementLayer, ExpectancyTracker
+    GatekeeperLayer, RiskLayer, PositionExitLayer, ActiveTrade, CapitalManagementLayer, ExpectancyTracker,
+    SignalDirection
 } from './core/architecture';
+import { v4 as uuidv4 } from 'uuid';
 
 let db: any = null;
 let expectancyMatrixLoaded = false;
@@ -51,6 +56,9 @@ export interface LiveState {
   maxHistoricalEquity?: number;
   initialBalance?: number;
   warmupUntil?: number;
+  // New ledger fields
+  orderIntents?: Record<string, OrderIntent>;
+  positionLedger?: Record<string, PositionLedgerEntry>;
 }
 
 // Emulated virtual wallet state
@@ -66,12 +74,287 @@ export let state: LiveState = {
   lastUpdate: new Date().toISOString(),
   botSecret: BOT_SECRET,
   equityHistory: [],
-  maxHistoricalEquity: 10000.00
+  maxHistoricalEquity: 10000.00,
+  orderIntents: {},
+  positionLedger: {}
 };
 
 export let exchange: any = null;
 let pollInterval: NodeJS.Timeout | null = null;
 export let simulatedPositions: ActiveTrade[] = [];
+
+// --- LEDGER & IDEMPOTENCY HELPERS ---
+
+export async function persistOrderIntent(intent: OrderIntent) {
+    if (!state.orderIntents) state.orderIntents = {};
+    state.orderIntents[intent.clientOrderId] = intent;
+    console.log(`[ORDER_INTENT_PERSISTED] ${intent.actionType} for ${intent.symbol} | ClientID: ${intent.clientOrderId}`);
+    await saveState();
+}
+
+export async function updateIntentStatus(clientOrderId: string, status: IntentStatus, error?: string) {
+    if (state.orderIntents && state.orderIntents[clientOrderId]) {
+        state.orderIntents[clientOrderId].status = status;
+        state.orderIntents[clientOrderId].updatedAt = new Date().toISOString();
+        if (error) state.orderIntents[clientOrderId].error = error;
+        await saveState();
+    }
+}
+
+export async function recordFill(fill: FillRecord) {
+    const positionId = fill.positionId;
+    if (!state.positionLedger) state.positionLedger = {};
+    
+    if (!state.positionLedger[positionId]) {
+        // This should not happen if we tracked the intent correctly, but as a safety:
+        console.error(`[LEDGER_ERROR] Received fill for unknown positionId: ${positionId}`);
+        return;
+    }
+
+    const ledger = state.positionLedger[positionId];
+    ledger.updatedAt = new Date().toISOString();
+    
+    if (fill.side === (ledger.side === 'LONG' ? 'buy' : 'sell')) {
+        // Adding to position
+        const oldEntryVal = ledger.totalEntryAmount * ledger.averageEntryPrice;
+        const newFillVal = fill.amount * fill.price;
+        ledger.totalEntryAmount += fill.amount;
+        ledger.averageEntryPrice = (oldEntryVal + newFillVal) / ledger.totalEntryAmount;
+        ledger.currentOpenAmount += fill.amount;
+        if (!ledger.entryOrderIds.includes(fill.orderId)) ledger.entryOrderIds.push(fill.orderId);
+    } else {
+        // Reducing position
+        const oldExitVal = ledger.totalExitAmount * ledger.averageExitPrice;
+        const newFillVal = fill.amount * fill.price;
+        ledger.totalExitAmount += fill.amount;
+        ledger.averageExitPrice = (oldExitVal + newFillVal) / (ledger.totalExitAmount || 1);
+        ledger.currentOpenAmount -= fill.amount;
+        if (!ledger.exitOrderIds.includes(fill.orderId)) ledger.exitOrderIds.push(fill.orderId);
+        
+        // Update Realized PnL
+        const entryPrice = ledger.averageEntryPrice;
+        const exitPrice = fill.price;
+        const pnlFactor = ledger.side === 'LONG' ? (exitPrice - entryPrice) : (entryPrice - exitPrice);
+        ledger.realizedPnlGross += (pnlFactor * fill.amount);
+    }
+
+    ledger.realizedFees += fill.fee;
+    ledger.realizedPnlNet = ledger.realizedPnlGross - ledger.realizedFees;
+
+    if (Math.abs(ledger.currentOpenAmount) < 0.00001) {
+        ledger.status = 'CLOSED';
+        ledger.currentOpenAmount = 0;
+        console.log(`[POSITION_CLOSED_BY_LEDGER] ${ledger.symbol} | Net PnL: ${ledger.realizedPnlNet.toFixed(2)}`);
+    }
+
+    console.log(`[FILL_RECORDED] ${fill.symbol} | Amount: ${fill.amount} | Price: ${fill.price} | Fee: ${fill.fee} ${fill.feeCurrency}`);
+    await saveState();
+}
+
+async function validateMarketDataFreshness(candles: Bar[], timeframe: string) {
+    if (!candles || candles.length === 0) return false;
+    const lastCandle = candles[candles.length - 1];
+    const lastTs = new Date(lastCandle.t).getTime();
+    const now = Date.now();
+    const ageMs = now - lastTs;
+
+    let maxToleranceMs = 120 * 60 * 1000; // Default 120m for 1H
+    if (timeframe === '4h') maxToleranceMs = 5 * 60 * 60 * 1000; // 5h for 4H
+
+    console.log(`[MARKET_DATA_FRESHNESS_CHECK] ${timeframe} | Age: ${(ageMs / 60000).toFixed(1)}m | Tolerance: ${maxToleranceMs / 60000}m`);
+
+    if (ageMs > maxToleranceMs) {
+        console.error(`[STALE_DATA_DETECTED] Market data for ${timeframe} is too old! Age: ${(ageMs / 60000).toFixed(1)}m`);
+        return false;
+    }
+    return true;
+}
+
+export async function createProtectedLimitEntryOrder(params: {
+    symbol: string,
+    side: 'buy' | 'sell',
+    amount: number,
+    lastPrice: number,
+    slippageBuffer: number,
+    timeoutMs: number,
+    clientOrderId: string,
+    positionId: string
+}) {
+    const { symbol, side, amount, lastPrice, slippageBuffer, timeoutMs, clientOrderId, positionId } = params;
+
+    const limitPrice = side === 'buy' ? lastPrice * (1 + slippageBuffer) : lastPrice * (1 - slippageBuffer);
+    const preciseLimitPrice = parseFloat(limitPrice.toFixed(symbol.includes('BTC') ? 1 : 2));
+
+    console.log(`[LIMIT_ENTRY_INTENT_CREATED] ${side.toUpperCase()} ${amount} ${symbol} @ ${preciseLimitPrice} (Ref: ${lastPrice})`);
+
+    const intent: OrderIntent = {
+        intentId: uuidv4(),
+        clientOrderId,
+        actionType: "ENTRY",
+        symbol,
+        side,
+        amount,
+        price: preciseLimitPrice,
+        reduceOnly: false,
+        status: IntentStatus.INTENT_CREATED,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        retryCount: 0,
+        linkedPositionId: positionId
+    };
+
+    await persistOrderIntent(intent);
+
+    try {
+        await updateIntentStatus(clientOrderId, IntentStatus.SUBMITTED);
+        const orderRes = await exchange.createLimitOrder(symbol, side, amount, preciseLimitPrice, { clientOrderId });
+        await updateIntentStatus(clientOrderId, IntentStatus.ACKNOWLEDGED);
+
+        // Wait for execution or timeout
+        let filledAmount = 0;
+        let avgPrice = 0;
+        const start = Date.now();
+
+        while (Date.now() - start < timeoutMs) {
+            const order = await exchange.fetchOrder(clientOrderId, symbol);
+            if (order.status === 'closed') {
+                filledAmount = order.filled;
+                avgPrice = order.average;
+                break;
+            }
+            await new Promise(r => setTimeout(r, 2000));
+        }
+
+        if (filledAmount === 0) {
+            console.warn(`[LIMIT_ENTRY_TIMEOUT] Order not filled within ${timeoutMs}ms. Attempting cancellation...`);
+            try {
+                await exchange.client.cancelOrder({ cli_ord_id: clientOrderId, symbol: exchange.symbolToNative(symbol) });
+                const finalOrder = await exchange.fetchOrder(clientOrderId, symbol);
+                filledAmount = finalOrder.filled || 0;
+                avgPrice = finalOrder.average || 0;
+            } catch (e) {
+                // If cancel fails, it might have just filled.
+                const finalOrder = await exchange.fetchOrder(clientOrderId, symbol);
+                filledAmount = finalOrder.filled || 0;
+                avgPrice = finalOrder.average || 0;
+            }
+        }
+
+        if (filledAmount > 0) {
+            const isPartial = filledAmount < amount;
+            await updateIntentStatus(clientOrderId, isPartial ? IntentStatus.PARTIAL : IntentStatus.FILLED);
+            console.log(`[LIMIT_ENTRY_${isPartial ? 'PARTIAL' : 'FILLED'}] ${symbol} | Amount: ${filledAmount} | Price: ${avgPrice}`);
+            
+            // Record in ledger
+            await recordFill({
+                fillId: uuidv4(),
+                orderId: clientOrderId,
+                clientOrderId,
+                symbol,
+                side,
+                amount: filledAmount,
+                price: avgPrice,
+                fee: filledAmount * avgPrice * 0.0005, // Estimate 0.05% fee if broker doesn't provide
+                feeCurrency: 'USD',
+                timestamp: new Date().toISOString(),
+                liquidityType: 'taker',
+                positionId,
+                source: 'broker_fetchOrder'
+            });
+
+            return { success: true, filledAmount, avgPrice, isPartial };
+        } else {
+            await updateIntentStatus(clientOrderId, IntentStatus.CANCELED);
+            console.error(`[ENTRY_NOT_FILLED_CANCELED] ${symbol} could not be entered.`);
+            return { success: false, filledAmount: 0 };
+        }
+
+    } catch (e: any) {
+        console.error(`[LIMIT_ENTRY_FAILED] ${symbol}:`, e.message);
+        await updateIntentStatus(clientOrderId, IntentStatus.FAILED, e.message);
+        return { success: false, filledAmount: 0, error: e.message };
+    }
+}
+
+async function attachNativeProtections(p: ActiveTrade, filledAmount: number) {
+    if (!exchange) return;
+    
+    console.log(`[NATIVE_SL_INTENT_CREATED] Target SL: ${p.stopLoss} for ${p.symbol}`);
+    
+    const slClientOrderId = `sl-${p.id.substring(0, 10)}`;
+    const intent: OrderIntent = {
+        intentId: uuidv4(),
+        clientOrderId: slClientOrderId,
+        actionType: "STOP_LOSS",
+        symbol: p.symbol,
+        side: p.direction === 'LONG' ? 'sell' : 'buy',
+        amount: filledAmount,
+        triggerPrice: p.stopLoss,
+        reduceOnly: true,
+        status: IntentStatus.INTENT_CREATED,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        retryCount: 0,
+        linkedPositionId: p.id
+    };
+
+    await persistOrderIntent(intent);
+
+    try {
+        await updateIntentStatus(slClientOrderId, IntentStatus.SUBMITTED);
+        const slRes = await exchange.updateStopLossOrder(p.symbol, intent.side, filledAmount, p.stopLoss);
+        if (slRes && slRes.id) {
+            await updateIntentStatus(slClientOrderId, IntentStatus.FILLED); // For SL confirmed means the TRIGGER order is active
+            console.log(`[NATIVE_SL_CONFIRMED] Position ${p.symbol} protected. SL Order ID: ${slRes.id}`);
+            
+            if (state.positionLedger && state.positionLedger[p.id]) {
+                state.positionLedger[p.id].nativeStopLossOrderId = slRes.id;
+                await saveState();
+            }
+            return true;
+        } else {
+            throw new Error("Rejected by broker");
+        }
+    } catch (e: any) {
+        console.error(`[NATIVE_SL_FAILED] EMERGENCY! Position ${p.symbol} is NOT protected:`, e.message);
+        await updateIntentStatus(slClientOrderId, IntentStatus.FAILED, e.message);
+        // Mark as emergency
+        if (state.positionLedger && state.positionLedger[p.id]) {
+            state.positionLedger[p.id].status = "EMERGENCY_UNPROTECTED";
+            await saveState();
+        }
+        return false;
+    }
+}
+
+async function reconcilePendingIntents() {
+    if (!state.orderIntents || !exchange) return;
+
+    for (const [clientOrderId, intent] of Object.entries(state.orderIntents)) {
+        if (intent.status === IntentStatus.SUBMITTED || intent.status === IntentStatus.UNKNOWN_TIMEOUT) {
+            console.log(`[ORDER_RECONCILIATION_STARTED] Checking status for pending intent: ${clientOrderId}`);
+            try {
+                const order = await exchange.fetchOrder(clientOrderId, intent.symbol);
+                if (order && order.status === 'closed') {
+                    if (order.filled > 0) {
+                        await updateIntentStatus(clientOrderId, IntentStatus.FILLED);
+                        // Fills will be picked up by the loopTick sync or we could trigger it here
+                    } else {
+                        await updateIntentStatus(clientOrderId, IntentStatus.CANCELED);
+                    }
+                    console.log(`[ORDER_RECONCILED_BY_CLIENT_ID] ${clientOrderId} reconciled as ${intent.status}`);
+                } else if (order && order.status === 'open') {
+                    await updateIntentStatus(clientOrderId, IntentStatus.ACKNOWLEDGED);
+                } else if (!order || order.status === 'canceled') {
+                     await updateIntentStatus(clientOrderId, IntentStatus.CANCELED);
+                }
+            } catch (e: any) {
+                console.error(`[RECONCILIATION_FAILED] Could not reconcile ${clientOrderId}:`, e.message);
+                await updateIntentStatus(clientOrderId, IntentStatus.MANUAL_REVIEW_REQUIRED, e.message);
+            }
+        }
+    }
+}
 
 // Promise to ensure we only load state once and can await it
 let initialStateLoaded = false;
@@ -313,6 +596,81 @@ class KrakenExchangeAdapter {
         return arr.slice(-limit);
     }
 
+    async createLimitOrder(symbol: string, side: string, amount: number, price: number, params: any = {}) {
+        const payload: any = {
+            symbol: this.symbolToNative(symbol),
+            side: side as 'buy' | 'sell',
+            size: amount,
+            orderType: 'lmt',
+            limitPrice: price,
+            reduceOnly: params.reduceOnly
+        };
+        if (params.clientOrderId) {
+            payload.cliOrdId = params.clientOrderId;
+        }
+        const res = await this.client.submitOrder(payload);
+        const returnedId = res.sendStatus?.order_id || (res.sendStatus as any)?.orderEvents?.[0]?.order?.orderId;
+        if (returnedId) {
+            return { id: returnedId, clientOrderId: params.clientOrderId };
+        } else {
+            throw new MockCcxtExchangeError("Failed to parse order ID from response");
+        }
+    }
+
+    async ensureIsolatedLeverage(symbol: string, desiredLeverage: number) {
+        console.log(`[LEVERAGE_SET_INTENT] Setting leverage to ${desiredLeverage}x for ${symbol}`);
+        try {
+            // Kraken Futures documentation: PUT /leveragepreferences
+            // Using raw call if not explicitly in SDK version
+            const symbolNative = this.symbolToNative(symbol);
+            
+            // Check if contract is compatible
+            const instruments = await this.client.getInstruments();
+            const inst = instruments.instruments.find((x: any) => x.symbol === symbolNative);
+            if (!inst) throw new Error(`Symbol ${symbol} not found on Kraken Futures`);
+
+            // @ts-ignore - Assuming the SDK might not have the typed method for this specific PUT endpoint yet
+            const res = await this.client.request('PUT', '/leveragepreferences', {
+                symbol: symbolNative,
+                maxLeverage: desiredLeverage,
+                marginMode: 'isolated' // Force isolated
+            });
+
+            if (res.result === 'success') {
+                console.log(`[ISOLATED_MARGIN_CONFIRMED] Leverage set to ${desiredLeverage}x for ${symbol}`);
+                return true;
+            }
+            throw new Error(res.error || "Unknown error setting leverage");
+        } catch (e: any) {
+            if (e.message.includes('not found') || e.message.includes('404')) {
+                // Fallback: Some accounts might not support this endpoint yet or use global settings
+                console.warn(`[LEVERAGE_SET_FAILED] Leverage endpoint not found. Using account default. Risk: MEDIUM.`);
+                return true; // We continue but with warning
+            }
+            console.error(`[LEVERAGE_SET_FAILED] ${e.message}`);
+            return false;
+        }
+    }
+
+    async updateStopLossOrder(symbol: string, side: string, amount: number, triggerPrice: number) {
+        // Kraken Futures: Use 'stp' (Stop) order type
+        const payload: any = {
+            symbol: this.symbolToNative(symbol),
+            side: side as 'buy' | 'sell',
+            size: amount,
+            orderType: 'stp',
+            stopPrice: triggerPrice,
+            reduceOnly: true
+        };
+        const res = await this.client.submitOrder(payload);
+        const returnedId = res.sendStatus?.order_id || (res.sendStatus as any)?.orderEvents?.[0]?.order?.orderId;
+        if (returnedId) {
+            return { id: returnedId };
+        } else {
+            throw new Error("Failed to parse SL order ID");
+        }
+    }
+
     async createMarketOrder(symbol: string, side: string, amount: number, price?: number, params: any = {}) {
         const payload: any = {
             symbol: this.symbolToNative(symbol),
@@ -331,30 +689,6 @@ class KrakenExchangeAdapter {
         } else {
             throw new MockCcxtExchangeError("Failed to parse order ID from response");
         }
-    }
-
-    async updateStopLossOrder(symbol: string, side: string, amount: number, stopPrice: number, existingOrderId?: string) {
-        if (existingOrderId) {
-            try {
-                await this.client.cancelOrder({ orderId: existingOrderId, symbol: this.symbolToNative(symbol) });
-                await new Promise(r => setTimeout(r, 200));
-            } catch (e) {
-                // Ignore cancel errors (might be already filled or canceled)
-            }
-        }
-        const payload: any = {
-            symbol: this.symbolToNative(symbol),
-            side: side as 'buy' | 'sell',
-            size: amount,
-            orderType: 'stp',
-            stopPrice: this.amountToPrecision(symbol, stopPrice),
-            reduceOnly: true
-        };
-        const res = await this.client.submitOrder(payload);
-        const returnedId = res.sendStatus?.order_id || (res.sendStatus as any)?.orderEvents?.[0]?.order?.orderId;
-        if (returnedId) return { id: returnedId };
-        // Could be rejected, e.g., if price is invalid
-        return null;
     }
 
     async fetchOrder(id: string, symbol: string) {
@@ -986,6 +1320,9 @@ export async function loopTick() {
   const stateHashBefore = hashStateSnapshot();
   
   try {
+    // P1: Reconcile any pending intents from a previous crash/restart
+    await reconcilePendingIntents();
+
     state.lastUpdate = new Date().toISOString();
     
     // Load historical bars for the strategy formulation (9 layers need OHLCV, not just tickers)
@@ -1029,6 +1366,14 @@ export async function loopTick() {
         
         const validBTC1H = filterClosedCandles(btc1H, '1h', nowMs);
         const validBTC4H = filterClosedCandles(btc4H, '4h', nowMs);
+
+        // P6: Drift Detection on OHLCV
+        const btc1HFresh = await validateMarketDataFreshness(validBTC1H, '1h');
+        if (!btc1HFresh) {
+            console.warn(`[TRADING_HALTED_STALE_DATA] BTC anchor data is stale. Skipping tick logic.`);
+            isTicking = false;
+            return;
+        }
 
         if (validBTC1H.length > 50 && validBTC4H.length > 200) {
             globalFeatures = MarketDataLayer.prepareFeatures(validBTC1H, validBTC4H);
@@ -1353,6 +1698,10 @@ export async function loopTick() {
           const validSym4H = filterClosedCandles(sym4H, '4h', nowMs);
 
         if (validSym1H.length > 50 && validSym4H.length > 200) {
+              // P6: Drift Detection for specific symbol
+              const symFresh = await validateMarketDataFreshness(validSym1H, '1h');
+              if (!symFresh) continue;
+
               const features = MarketDataLayer.prepareFeatures(validSym1H, validSym4H);
               
               // PRICE TARGETING ENTRY DELAY FIX: Use real-time live ticker price
@@ -1417,115 +1766,110 @@ export async function loopTick() {
                       if (finalSize > 0) {
                           console.log(`[ENTRY LAYER] Open ${symbol} ${signal.direction} at $${features.price}`);
                           
-                          let isLiveExecutionSuccess = true;
-                          const clientOrderId = `bot_${symbol.replace(/[^A-Z]/g, '')}_${signal.direction === 'LONG' ? 'buy' : 'sell'}_${Date.now()}_${Math.floor(Math.random()*1000)}`;
-                          let brokerOrderId = clientOrderId;
+                          const positionId = `pos_${symbol.replace(/[^A-Z]/g, '')}_${Date.now()}`;
+                          const clientOrderId = `entry_${positionId.substring(4)}`;
                           
-                          console.log(JSON.stringify({
-                             event: "ORDER_INTENT_CREATED", symbol, side: signal.direction,
-                             clientOrderId, amount: finalSize, price: features.price
-                          }));
-
+                          // P3/P5: Isolated Margin & Leverage Preference before Entry
                           if (process.env.LIVE_TRADING_ENABLED === 'true') {
-                              console.log(`[LIVE EXECUTION] Sending ${signal.direction} order for ${symbol} to Kraken Futures...`);
-                              const side = signal.direction === 'LONG' ? 'buy' : 'sell';
-                              let createSuccess = false;
-                              try {
-                                  const params = { clientOrderId };
-                                  const order = await ccxtWithRetry(() => exchange.createMarketOrder(symbol, side, finalSize, undefined, params));
-                                  console.log(`[LIVE EXECUTION] Order successful:`, (order as any).id);
-                                  brokerOrderId = (order as any).id || clientOrderId;
-                                  
-                                  console.log(JSON.stringify({ event: "ORDER_SUBMITTED", symbol, orderId: brokerOrderId, clientOrderId }));
-                                  createSuccess = true;
-                                  
-                                  await delaySleep(500); 
-                                  const fetchedOrder = await exchange.fetchOrder(brokerOrderId, symbol);
-                                  console.log(JSON.stringify({ event: "ORDER_FETCHED", fetchedOrder }));
-                                  if (fetchedOrder && fetchedOrder.status && ['rejected', 'failed', 'canceled'].includes(fetchedOrder.status.toLowerCase())) {
-                                      createSuccess = false;
-                                      throw new Error(`Order was rejected by exchange with status: ${fetchedOrder.status}`);
-                                  }
-                                  if (fetchedOrder && fetchedOrder.average) {
-                                      realEntryPrice = fetchedOrder.average;
-                                      console.log(JSON.stringify({ event: "ORDER_FILLED", realEntryPrice, symbol }));
-                                  } else {
-                                      console.log(JSON.stringify({ event: "ORDER_PARTIAL", reason: "Actual entry price unavailable, using limit", symbol }));
-                                  }
-                                  if (fetchedOrder && fetchedOrder.filled && fetchedOrder.filled > 0) {
-                                      finalSize = fetchedOrder.filled;
-                                  }
-                              } catch(e: any) {
-                                  console.error(`[LIVE EXECUTION] Error during order/fetch for ${symbol}:`, e.message);
-                                  
-                                  if (!createSuccess) {
-                                      console.log(JSON.stringify({ event: "ORDER_FAILED", reason: e.message, symbol, severity: "CRITICAL" }));
-                                      isLiveExecutionSuccess = false;
-                                      try {
-                                          console.log(`[LIVE EXECUTION] Checking for orphaned position for ${symbol}...`);
-                                          const livePos = await exchange.fetchPositions();
-                                          const orphanedPos = livePos.find((p: any) => p.symbol === symbol && Math.abs(p.contracts || 0) > 0);
-                                          if (orphanedPos) {
-                                              console.error(`[LIVE EXECUTION] ORPHAN FOUND. Dropping it via reduceOnly to prevent desync.`);
-                                              try {
-                                                  const dropSide = orphanedPos.contracts > 0 ? 'sell' : 'buy';
-                                                  await ccxtWithRetry(() => exchange.createMarketOrder(symbol, dropSide, Math.abs(orphanedPos.contracts), undefined, { reduceOnly: true }));
-                                                  console.log(`[LIVE EXECUTION] Orphan successfully dropped.`);
-                                              } catch (dropErr: any) {
-                                                  console.error(`[LIVE EXECUTION] Failed completely to drop orphan: ${dropErr.message}`);
-                                                  // IMPORTANT: if we failed to drop the orphan, we MUST assume the position is open to prevent desync crash
-                                                  isLiveExecutionSuccess = true;
-                                                  finalSize = Math.abs(orphanedPos.contracts);
-                                              }
-                                          } else {
-                                              console.log(`[LIVE EXECUTION] CONFIRMED: No position opened.`);
-                                          }
-                                      } catch (syncError: any) {
-                                          console.error(`[LIVE EXECUTION] Sync check failed.`, syncError.message);
-                                          // If we can't even check, just assume false. (Though a crash might happen if it was open).
-                                      }
-                                  } else {
-                                      console.error(`[LIVE EXECUTION] createMarketOrder succeeded but fetchOrder failed. Treating as SUCCESS and active. 
-                                      Error: ${e.message}`);
-                                      isLiveExecutionSuccess = true;
-                                  }
+                              const leverageOk = await exchange.ensureIsolatedLeverage(symbol, risk.leverage || 2);
+                              if (!leverageOk) {
+                                  console.error(`[ENTRY_BLOCKED_MARGIN_MODE_UNSAFE] Could not confirm isolated margin for ${symbol}`);
+                                  continue;
                               }
                           }
 
-                          if (isLiveExecutionSuccess) {
-                              const newPos: any = {
-                                  id: brokerOrderId,
+                          // Initialize Ledger Entry
+                          if (!state.positionLedger) state.positionLedger = {};
+                          state.positionLedger[positionId] = {
+                              positionId,
+                              symbol,
+                              side: signal.direction as 'LONG' | 'SHORT',
+                              status: 'OPEN',
+                              entryOrderIds: [],
+                              exitOrderIds: [],
+                              clientOrderIds: [clientOrderId],
+                              totalEntryAmount: 0,
+                              totalExitAmount: 0,
+                              averageEntryPrice: 0,
+                              averageExitPrice: 0,
+                              realizedFees: 0,
+                              unrealizedFeesEstimate: 0,
+                              realizedPnlGross: 0,
+                              realizedPnlNet: 0,
+                              currentOpenAmount: 0,
+                              mfe: 0,
+                              mae: 0,
+                              barsHeld: 0,
+                              createdAt: new Date().toISOString(),
+                              updatedAt: new Date().toISOString()
+                          };
+
+                          let isLiveExecutionSuccess = true;
+                          let finalFilledSize = 0;
+
+                          if (process.env.LIVE_TRADING_ENABLED === 'true') {
+                              // P3: Protected Limit Entry
+                              const side = signal.direction === 'LONG' ? 'buy' : 'sell';
+                              const entryRes = await createProtectedLimitEntryOrder({
                                   symbol,
-                                  direction: signal.direction,
+                                  side,
+                                  amount: finalSize,
+                                  lastPrice: features.price,
+                                  slippageBuffer: 0.001, // 0.1% buffer
+                                  timeoutMs: 30000,
+                                  clientOrderId,
+                                  positionId
+                              });
+
+                              if (entryRes.success) {
+                                  finalFilledSize = entryRes.filledAmount;
+                                  realEntryPrice = entryRes.avgPrice;
+                                  
+                                  // P4: Native Stop Loss post-fill
+                                  const pMock = { id: positionId, symbol, direction: signal.direction, stopLoss: risk.stopLoss } as any;
+                                  await attachNativeProtections(pMock, finalFilledSize);
+                              } else {
+                                  isLiveExecutionSuccess = false;
+                                  delete state.positionLedger[positionId];
+                              }
+                          } else {
+                              // Visual/Paper simulation
+                              finalFilledSize = finalSize;
+                          }
+                          
+                          if (isLiveExecutionSuccess) {
+                              const newPos: ActiveTrade = {
+                                  id: positionId,
+                                  symbol: symbol,
+                                  direction: signal.direction as SignalDirection,
                                   entryPrice: realEntryPrice,
-                                  size: finalSize,
+                                  size: finalFilledSize,
                                   leverage: risk.leverage,
+                                  entryTime: Date.now(),
+                                  stopLoss: risk.stopLoss,
+                                  takeProfit: risk.takeProfit,
                                   initialStopLoss: risk.stopLoss,
                                   currentStopLoss: risk.stopLoss,
                                   catastropheStopLoss: risk.catastropheStopLoss,
                                   highWaterMark: realEntryPrice,
                                   lowWaterMark: realEntryPrice,
-                                  barsHeld: 0,
-                                  entryRegime: state.regime as TradingRegime,
                                   unrealizedPnl: 0,
-                                  clientOrderId,
-                                  _lastHourId: Math.floor(Date.now() / 3600000)
+                                  mfe: 0,
+                                  mae: 0,
+                                  barsHeld: 0,
+                                  status: 'OPEN',
+                                  riskTier: risk.tierLabel,
+                                  entryRegime: displayRegime as TradingRegime,
+                                  engine: signal.engine
                               };
                               
-                              if (process.env.LIVE_TRADING_ENABLED === 'true') {
-                                  try {
-                                      const side = signal.direction === 'LONG' ? 'sell' : 'buy';
-                                      const slResp = await ccxtWithRetry(() => exchange.updateStopLossOrder(symbol, side, finalSize, risk.stopLoss));
-                                      if (slResp?.id) {
-                                          newPos.brokerStopLossOrderId = slResp.id;
-                                          console.log(`[LIVE EXECUTION] Native Stop Loss attached for ${symbol}: ${slResp.id}`);
-                                      }
-                                  } catch (e: any) {
-                                      console.warn(`[LIVE EXECUTION] Failed to set native Stop Loss natively initially: ${e.message}`);
-                                  }
+                              if (process.env.LIVE_TRADING_ENABLED === 'true' && state.positionLedger[positionId]) {
+                                  (newPos as any).brokerStopLossOrderId = state.positionLedger[positionId].nativeStopLossOrderId;
+                                  (newPos as any).clientOrderId = clientOrderId;
                               }
-                              
+
                               simulatedPositions.push(newPos);
+                              console.log(`[ENTRY_AVERAGE_PRICE_CONFIRMED] Position ${symbol} opened with size ${finalFilledSize} at ${realEntryPrice}`);
                           }
                       }
                   } else {
