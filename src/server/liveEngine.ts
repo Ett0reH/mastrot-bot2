@@ -59,6 +59,7 @@ export interface LiveState {
   // New ledger fields
   orderIntents?: Record<string, OrderIntent>;
   positionLedger?: Record<string, PositionLedgerEntry>;
+  lastSignalTimes?: Record<string, string>;
 }
 
 // Emulated virtual wallet state
@@ -76,7 +77,8 @@ export let state: LiveState = {
   equityHistory: [],
   maxHistoricalEquity: 10000.00,
   orderIntents: {},
-  positionLedger: {}
+  positionLedger: {},
+  lastSignalTimes: {}
 };
 
 export let exchange: any = null;
@@ -1376,15 +1378,19 @@ export async function loopTick() {
         }
 
         if (validBTC1H.length > 50 && validBTC4H.length > 200) {
-            globalFeatures = MarketDataLayer.prepareFeatures(validBTC1H, validBTC4H);
+            console.log("Preparing features for BTC...");
+            globalFeatures = MarketDataLayer.prepareFeatures(validBTC1H, validBTC4H, true);
             state.regime = RegimeLayer.detect(globalFeatures);
             btcLivePrice = validBTC1H[validBTC1H.length - 1].c;
+            console.log("BTC Features done:", state.regime);
         }
     } catch(e) {
         console.error("Failed to parse BTC base regime anchor", e);
     }
 
+    console.log("Fetching tickers...");
     const tickers = await ccxtWithRetry(() => exchange.fetchTickers(TARGET_SYMBOLS));
+    console.log("Tickers fetched!");
 
     let totalPnl = 0;
     const FEE_RATE = 0.0005;
@@ -1702,7 +1708,7 @@ export async function loopTick() {
               const symFresh = await validateMarketDataFreshness(validSym1H, '1h');
               if (!symFresh) continue;
 
-              const features = MarketDataLayer.prepareFeatures(validSym1H, validSym4H);
+              const features = MarketDataLayer.prepareFeatures(validSym1H, validSym4H, true);
               
               // PRICE TARGETING ENTRY DELAY FIX: Use real-time live ticker price
               // instead of historical closed 1H candle price for SL and Size calculations
@@ -1721,6 +1727,12 @@ export async function loopTick() {
               console.log(`[DATA CHECK] ${symbol} Price: ${features.price}, RSI: ${features.rsi1H ? features.rsi1H.toFixed(2) : 'N/A'}, Local Regime: ${displayRegime}, Signal: ${signal.direction}`);
 
               if (signal.direction !== 'NEUTRAL') {
+                  const signalH4Time = validSym4H[validSym4H.length - 1].t;
+                  if (state.lastSignalTimes && state.lastSignalTimes[symbol] === signalH4Time) {
+                      console.log(`[COOLDOWN] Skipping ${signal.direction} on ${symbol} (Already fired for 4H bar: ${signalH4Time})`);
+                      continue;
+                  }
+
                   const gate = GatekeeperLayer.allowEntry(signal, features, localRegime as TradingRegime, symbol);
                   if (gate.allowed) {
                       const risk = RiskLayer.calculateRisk(
@@ -1867,6 +1879,9 @@ export async function loopTick() {
                                   (newPos as any).brokerStopLossOrderId = state.positionLedger[positionId].nativeStopLossOrderId;
                                   (newPos as any).clientOrderId = clientOrderId;
                               }
+
+                              if (!state.lastSignalTimes) state.lastSignalTimes = {};
+                              state.lastSignalTimes[symbol] = signalH4Time;
 
                               simulatedPositions.push(newPos);
                               console.log(`[ENTRY_AVERAGE_PRICE_CONFIRMED] Position ${symbol} opened with size ${finalFilledSize} at ${realEntryPrice}`);

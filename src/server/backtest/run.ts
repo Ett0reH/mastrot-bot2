@@ -197,8 +197,8 @@ async function fetch15mData(
 async function runEventDrivenBacktest() {
   process.env.BACKTEST_MODE = "true";
   console.log("--- MULTI-YEAR SIMULATION ARCHITECTURE V2 (MAX PERIOD) ---");
-  const start = "2026-03-01T00:00:00Z";
-  const end = "2026-04-29T00:00:00Z";
+  const start = "2021-01-01T00:00:00Z";
+  const end = "2026-04-27T00:00:00Z";
 
   // FASE 3: Load Expectancy Matrix
   try {
@@ -294,7 +294,7 @@ async function runEventDrivenBacktest() {
       }
 
       const tickDate = new Date(tick.t);
-      if (tickDate.getTime() >= new Date("2026-04-20T00:00:00Z").getTime()) {
+      if (tickDate.getTime() >= new Date("2025-01-01T00:00:00Z").getTime()) {
         ticksWithState.push({
           tick,
           h1Closed,

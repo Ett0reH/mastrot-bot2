@@ -522,7 +522,7 @@ export const NormalRsi2TrendTrailingConfig = {
   fastMaLength: 50,
   slowMaLength: 200,
   maType: "EMA",
-  longTrailingStopPercent: 0.02,
+  longTrailingStopPercent: 0.01,
   cooldownBarsAfterExit: 1,
   allowedNormalSubRegimes: ["BULL"],
   blockedNormalSubRegimes: ["BEAR"],
