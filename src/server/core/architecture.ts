@@ -359,11 +359,11 @@ export interface SignalCandidate {
 export function generateExtremeSignals(context: SignalContext): SignalCandidate {
   const { features, regime } = context;
   // Mean Reversion in CRASH
-  if (regime === "CRASH" && features.rsi1H < 25) {
+  if (regime === "CRASH" && features.rsi1H < 20) {
     return { direction: "LONG", quality: 0.9, type: "MEAN_REVERSION", engine: "EXTREME" };
   }
   // Mean Reversion in EUPHORIA (OMEGA NEW FIX: Shorting the absolute blow-off top)
-  if (regime === "EUPHORIA" && features.rsi1H > 85) {
+  if (regime === "EUPHORIA" && features.rsi1H > 80) {
     return { direction: "SHORT", quality: 0.9, type: "MEAN_REVERSION", engine: "EXTREME" };
   }
   return { direction: "NEUTRAL", quality: 0, type: "NONE", engine: "NONE" };
@@ -629,10 +629,11 @@ export function generateNormalMarketSignals(context: SignalContext): SignalCandi
     if (regime === "CRASH" || regime === "EUPHORIA") {
       const extremeSignal = generateExtremeSignals(context);
       if (extremeSignal.direction !== "NEUTRAL") return extremeSignal;
-    } else {
-      const normalSignal = generateNormalMarketSignals(context);
-      if (normalSignal.direction !== "NEUTRAL") return normalSignal;
     }
+    
+    // Default fallback to NORMAL engine for ALL regimes if extreme didn't trigger
+    const normalSignal = generateNormalMarketSignals(context);
+    if (normalSignal.direction !== "NEUTRAL") return normalSignal;
 
     return { direction: "NEUTRAL", quality: 0, type: "NONE", engine: "NONE" };
   }

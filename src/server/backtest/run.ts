@@ -197,7 +197,7 @@ async function fetch15mData(
 async function runEventDrivenBacktest() {
   process.env.BACKTEST_MODE = "true";
   console.log("--- MULTI-YEAR SIMULATION ARCHITECTURE V2 (MAX PERIOD) ---");
-  const start = "2021-01-01T00:00:00Z";
+  const start = "2025-04-01T00:00:00Z";
   const end = "2026-04-27T00:00:00Z";
 
   // FASE 3: Load Expectancy Matrix
@@ -582,6 +582,12 @@ async function runEventDrivenBacktest() {
 
         const signal = SignalLayer.evaluate(features, regime, symbol, { btcTrend1H, btcRegime });
 
+        if (symbol === "DOGE/USD" && regime === "EUPHORIA") {
+            const gate = GatekeeperLayer.allowEntry(signal, features, regime, symbol);
+            const tDate = new Date(tick.t);
+            console.log(`DOGE EUPHORIA TICK: date=${tDate.toISOString()} RSI1H=${features.rsi1H.toFixed(2)} signal=${signal.direction} type=${signal.type} allowed=${gate.allowed} reason=${gate.reason}`);
+        }
+
         // Cooldown per NORMAL: Attendere 1 candela 4H completa
         if (signal.direction !== "NEUTRAL" && signal.engine === "NORMAL") {
             const lastExit = lastExit4HLength[symbol] || 0;
@@ -625,6 +631,9 @@ async function runEventDrivenBacktest() {
             }, { cleanProfitFactor });
 
             if (tierDecision.blocked || tierDecision.tierLabel === "TRANSITION_BLOCKED") {
+                if (symbol === "DOGE/USD" && regime === "EUPHORIA" && gate.allowed) {
+                    console.log(`DOGE EUPHORIA TRADE DROPPED DUE TO TIER DECISION: ${tierDecision.reason}`);
+                }
                 if (signal.type === "RSI2_TREND_TRAILING" && signal.direction === "SHORT") {
                     console.log(`Tier blocked SHORT for ${symbol}`);
                 }
@@ -661,6 +670,8 @@ async function runEventDrivenBacktest() {
                 isBtcAligned: (signal.direction === "LONG" && btcTrend1H === 1) || (signal.direction === "SHORT" && btcTrend1H === -1),
                 meta: signal.meta
               });
+            } else if (symbol === "DOGE/USD" && regime === "EUPHORIA" && gate.allowed) {
+                console.log(`DOGE EUPHORIA TRADE DROPPED DUE TO SIZE 0: trueEquity=${trueEquity} capitalHealthMultiplier=${capitalHealth.allowedCapacityMultiplier} riskPerTradeSize=${risk.positionSize}`);
             }
           }
         }
@@ -709,6 +720,9 @@ async function runEventDrivenBacktest() {
                    // tracked at the end of the script
                }
                
+               if (candidate.symbol === "DOGE/USD") {
+                   console.log(`EXECUTED DOGE EUPHORIA TRADE: size=${candidate.finalSize} leverage=${candidate.risk.leverage}`);
+               }
                AnalyticsLayer.logDecision("ENTRY", candidate.symbol, candidate.signal.direction, {
                  type: candidate.signal.type,
                  regime: candidate.regime,
