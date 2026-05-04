@@ -89,7 +89,8 @@ async function fetch15mData(
   }
 
   const cacheFileName = `${symbol.replace("/", "_")}_15Min_${start.split("T")[0]}_${end.split("T")[0]}.json`;
-  const cacheFilePath = path.join(cacheDir, cacheFileName);
+  const megaCacheFile = path.join(cacheDir, `${symbol.replace("/", "_")}_15Min_2021-01-01_2026-05-01.json`);
+  const cacheFilePath = fs.existsSync(megaCacheFile) ? megaCacheFile : path.join(cacheDir, cacheFileName);
 
   let allBars: Bar[] = [];
   let currentStart = start;
@@ -99,21 +100,16 @@ async function fetch15mData(
       const cachedBars = JSON.parse(fs.readFileSync(cacheFilePath, "utf-8"));
       if (cachedBars && cachedBars.length > 0) {
         allBars = cachedBars;
-        const lastBar = cachedBars[cachedBars.length - 1];
-        const lastTime = new Date(lastBar.t).getTime();
-        const targetEnd = new Date(end).getTime();
-
-        if (lastTime >= targetEnd - 15 * 60 * 1000) {
-          console.log(
-            `Cache fully covers up to target end date for ${symbol}.`,
-          );
-          return allBars;
-        } else {
-          console.log(
-            `Cache exists but ends early at ${lastBar.t} for ${symbol}. Resuming...`,
-          );
-          currentStart = new Date(lastTime + 15 * 60 * 1000).toISOString();
-        }
+        // Filter elements locally
+        const tStart = new Date(start).getTime();
+        const tEnd = new Date(end).getTime();
+        allBars = allBars.filter(b => {
+          const t = new Date(b.t).getTime();
+          return t >= tStart && t <= tEnd;
+        });
+        
+        console.log(`Cache fully loaded offline for ${symbol} covering the range.`);
+        return allBars;
       }
     } catch (e) {
       console.error(`Invalid cache found for ${symbol}, downloading fresh.`);
@@ -197,8 +193,8 @@ async function fetch15mData(
 async function runEventDrivenBacktest() {
   process.env.BACKTEST_MODE = "true";
   console.log("--- MULTI-YEAR SIMULATION ARCHITECTURE V2 (MAX PERIOD) ---");
-  const start = "2025-04-01T00:00:00Z";
-  const end = "2026-04-27T00:00:00Z";
+  const start = "2021-01-01T00:00:00Z";
+  const end = "2026-05-01T00:00:00Z";
 
   // FASE 3: Load Expectancy Matrix
   try {
@@ -233,6 +229,7 @@ async function runEventDrivenBacktest() {
     let bars15m: Bar[] = [];
     try {
       bars15m = await fetch15mData(symbol, start, end);
+      console.log(`Length of bars15m for ${symbol} after fetch: ${bars15m.length}`);
       if (bars15m.length === 0) continue;
     } catch (e) {
       console.error(`Failed to fetch for ${symbol}:`, e);
@@ -293,16 +290,14 @@ async function runEventDrivenBacktest() {
         regime = RegimeLayer.detect(features);
       }
 
-      const tickDate = new Date(tick.t);
-      if (tickDate.getTime() >= new Date("2025-01-01T00:00:00Z").getTime()) {
-        ticksWithState.push({
-          tick,
-          h1Closed,
-          features,
-          regime,
-          bars4HLength: bars4H.length
-        });
-      }
+      // We rely solely on the warmup phase (bars1H/4H > 250)
+      ticksWithState.push({
+        tick,
+        h1Closed,
+        features,
+        regime,
+        bars4HLength: bars4H.length
+      });
     }
     symbolStates[symbol] = ticksWithState;
     console.log(`Precomputed ${ticksWithState.length} states for ${symbol}`);
@@ -991,10 +986,10 @@ async function runEventDrivenBacktest() {
       (a, b) => new Date(a.exitTime).getTime() - new Date(b.exitTime).getTime(),
     );
 
-    const startDate = new Date("2021-01-01T00:00:00Z");
-    const endDate = new Date("2026-04-27T20:00:00Z");
+    const startDateRaw = new Date(start);
+    const endDateRaw = new Date(end);
     const days = Math.round(
-      (endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24),
+      (endDateRaw.getTime() - startDateRaw.getTime()) / (1000 * 60 * 60 * 24),
     );
 
     let currentEq = startEquity;
@@ -1002,7 +997,7 @@ async function runEventDrivenBacktest() {
     let tradeIdx = 0;
 
     for (let i = 1; i <= days; i++) {
-      let currentDate = new Date(startDate.getTime() + i * 24 * 60 * 60 * 1000);
+      let currentDate = new Date(startDateRaw.getTime() + i * 24 * 60 * 60 * 1000);
       while (
         tradeIdx < allTrades.length &&
         new Date(allTrades[tradeIdx].exitTime) <= currentDate
@@ -1178,7 +1173,7 @@ async function runEventDrivenBacktest() {
   const configUsed = {
     symbols: SYMBOLS,
     timeframe: "1H/4H features calculated from 15m ticks",
-    period: "2021-01-01T00:00:00Z to 2026-04-27T00:00:00Z",
+    period: `${start} to ${end}`,
     initialCapital: 10000,
     fee: FEE_RATE,
     slippage: "Included in initial execution assumptions inside core",

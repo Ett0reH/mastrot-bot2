@@ -1212,8 +1212,6 @@ export class PositionExitLayer {
                return { shouldExit: true, exitType: "TRAILING_STOP" };
             }
         }
-        
-        // NORMAL non ha time-decay o regime derisking aggiuntivo, forza ritorno NONE.
         return { shouldExit: false, exitType: "NONE" };
     } else {
       // Adjusts trail based on leverage to maintain nominal risk

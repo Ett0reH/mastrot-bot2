@@ -5,8 +5,8 @@ process.env.LIVE_TRADING_ENABLED = 'true';
 
 import { initializeApp } from 'firebase/app';
 import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore/lite';
-import fs from 'fs';
-import path from 'path';
+import * as fs from 'fs';
+import * as path from 'path';
 import { calculateSnapshot } from '../lib/metricsCalculator';
 import { 
   IntentStatus, OrderIntent, FillRecord, PositionLedgerEntry 
@@ -230,7 +230,7 @@ export async function createProtectedLimitEntryOrder(params: {
         if (filledAmount === 0) {
             console.warn(`[LIMIT_ENTRY_TIMEOUT] Order not filled within ${timeoutMs}ms. Attempting cancellation...`);
             try {
-                await exchange.client.cancelOrder({ cli_ord_id: clientOrderId, symbol: exchange.symbolToNative(symbol) });
+                await exchange.client.cancelOrder({ cliOrdId: clientOrderId });
                 const finalOrder = await exchange.fetchOrder(clientOrderId, symbol);
                 filledAmount = finalOrder.filled || 0;
                 avgPrice = finalOrder.average || 0;
@@ -654,7 +654,22 @@ class KrakenExchangeAdapter {
         }
     }
 
-    async updateStopLossOrder(symbol: string, side: string, amount: number, triggerPrice: number) {
+    async updateStopLossOrder(symbol: string, side: string, amount: number, triggerPrice: number, existingOrderId?: string): Promise<{ id: string }> {
+        if (existingOrderId) {
+             const editRes = await this.client.editOrder({
+                 orderId: existingOrderId,
+                 stopPrice: triggerPrice,
+                 size: amount
+             });
+             const editReturnedId = editRes.editStatus?.orderId;
+             if (editReturnedId || editRes.editStatus?.status === 'edited') {
+                 return { id: existingOrderId };
+             }
+             // If edit fails or returns bad status, we might want to fallback but for now we just proceed to submit a new one or throw
+             // We'll throw so it can be retried or handled.
+             throw new Error(`Failed to edit SL order: ${JSON.stringify(editRes.editStatus)}`);
+        }
+
         // Kraken Futures: Use 'stp' (Stop) order type
         const payload: any = {
             symbol: this.symbolToNative(symbol),
@@ -662,6 +677,7 @@ class KrakenExchangeAdapter {
             size: amount,
             orderType: 'stp',
             stopPrice: triggerPrice,
+            triggerSignal: 'mark',
             reduceOnly: true
         };
         const res = await this.client.submitOrder(payload);
@@ -708,7 +724,7 @@ class KrakenExchangeAdapter {
                 fetchedFills = [];
             }
 
-            const matchedFills = fetchedFills.filter((f: any) => f.order_id === id || f.cli_ord_id === id);
+            const matchedFills = fetchedFills.filter((f: any) => f.order_id === id || f.cliOrdId === id);
             
             if (matchedFills.length > 0) {
                  const totalFilled = matchedFills.reduce((acc: number, f: any) => acc + parseFloat(f.size), 0);
@@ -727,7 +743,7 @@ class KrakenExchangeAdapter {
             try {
                const openRes = await this.client.getOpenOrders();
                const openOrders = openRes.openOrders || [];
-               const isPending = openOrders.some((o: any) => o.order_id === id || o.cli_ord_id === id);
+               const isPending = openOrders.some((o: any) => o.order_id === id || o.cliOrdId === id);
                
                if (isPending) {
                     return {
@@ -1083,7 +1099,7 @@ export async function emergencyCloseAll() {
                 if (openOrders.openOrders) {
                     for (const o of openOrders.openOrders) {
                         try {
-                            await ccxtWithRetry(() => exchange.client.cancelOrder({ orderId: o.orderId, symbol: o.symbol }));
+                            await ccxtWithRetry(() => exchange.client.cancelOrder({ order_id: o.order_id }));
                         } catch(e) {}
                     }
                     console.error(`[EMERGENCY_KILL_SWITCH] Cleared open orders via explicit loop.`);
@@ -1434,7 +1450,7 @@ export async function loopTick() {
         if (!exitDecision.shouldExit && oldStopLoss !== p.currentStopLoss && process.env.LIVE_TRADING_ENABLED === 'true') {
              try {
                  const side = p.direction === 'LONG' ? 'sell' : 'buy';
-                 const orderResp = await ccxtWithRetry(() => exchange.updateStopLossOrder(p.symbol, side, p.size, p.currentStopLoss, (p as any).brokerStopLossOrderId));
+                 const orderResp: any = await ccxtWithRetry(() => exchange.updateStopLossOrder(p.symbol, side, p.size, p.currentStopLoss, (p as any).brokerStopLossOrderId));
                  if (orderResp?.id) {
                      (p as any).brokerStopLossOrderId = orderResp.id;
                      console.log(`[TRAILING SL] Native Stop Loss updated on Kraken to $${p.currentStopLoss}`);
@@ -1473,7 +1489,7 @@ export async function loopTick() {
                  // Clean up native Stop Loss order if we exited cleanly with market order
                  if (isLiveExitSuccess && (p as any).brokerStopLossOrderId && (exchange as any).client.cancelOrder) {
                      try {
-                         await ccxtWithRetry(() => (exchange as any).client.cancelOrder({ orderId: (p as any).brokerStopLossOrderId, symbol: (exchange as any).symbolToNative(p.symbol) }));
+                         await ccxtWithRetry(() => (exchange as any).client.cancelOrder({ order_id: (p as any).brokerStopLossOrderId }));
                      } catch(e) {}
                  }
             }
