@@ -1749,12 +1749,24 @@ export async function loopTick() {
               const signal = SignalLayer.evaluate(features, localRegime as TradingRegime, symbol, { btcTrend1H: globalFeatures?.trend1H, btcRegime: state.regime as TradingRegime });
               
               const displayRegime = symbol === 'BTC/USD:USD' ? state.regime : localRegime;
-              console.log(`[DATA CHECK] ${symbol} Price: ${features.price}, RSI: ${features.rsi1H ? features.rsi1H.toFixed(2) : 'N/A'}, Local Regime: ${displayRegime}, Signal: ${signal.direction}`);
+              // console.log(`[DATA CHECK] ${symbol} Price: ${features.price}, RSI: ${features.rsi1H ? features.rsi1H.toFixed(2) : 'N/A'}, Local Regime: ${displayRegime}, Signal: ${signal.direction}`);
+
+              if (signal.direction === 'NEUTRAL') {
+                  const currentHour = new Date().getHours();
+                  if (!state.lastSignalTimes) state.lastSignalTimes = {};
+                  // Heartbeat log once per symbol periodically (every 4 hours, or immediately on first boot)
+                  const hbKey = `${symbol}_HB`;
+                  if (!state.lastSignalTimes[hbKey] || (state.lastSignalTimes[hbKey] !== currentHour.toString() && currentHour % 4 === 0)) {
+                      state.lastSignalTimes[hbKey] = currentHour.toString();
+                      logDecision({ action: "SCANNING", symbol, direction: "NEUTRAL", reason: "Nessun setup statistico individuato", price: features.price, regime: displayRegime });
+                  }
+              }
 
               if (signal.direction !== 'NEUTRAL') {
                   const signalH4Time = validSym4H[validSym4H.length - 1].t;
                   if (state.lastSignalTimes && state.lastSignalTimes[symbol] === signalH4Time) {
                       console.log(`[COOLDOWN] Skipping ${signal.direction} on ${symbol} (Already fired for 4H bar: ${signalH4Time})`);
+                      logDecision({ action: "COOLDOWN_SKIPPED", symbol, direction: signal.direction, reason: `Already fired for 4H bar (${signalH4Time})`, price: features.price, regime: displayRegime });
                       continue;
                   }
 
@@ -1814,6 +1826,7 @@ export async function loopTick() {
                               const leverageOk = await exchange.ensureIsolatedLeverage(symbol, risk.leverage || 2);
                               if (!leverageOk) {
                                   console.error(`[ENTRY_BLOCKED_MARGIN_MODE_UNSAFE] Could not confirm isolated margin for ${symbol}`);
+                                  logDecision({ action: "ORDER_SKIPPED", symbol, direction: signal.direction, reason: "Margin Setup Failed", price: features.price, regime: displayRegime });
                                   continue;
                               }
                           }
