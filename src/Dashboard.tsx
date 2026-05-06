@@ -753,6 +753,62 @@ export default function Dashboard() {
                   </div>
                 </div>
 
+                {/* Bot Decisions / Logic Log */}
+                <div className="border border-white/5 bg-[#1A1C22]/80 backdrop-blur-md rounded-lg overflow-hidden flex flex-col mt-2">
+                  <div className="px-6 py-4 border-b border-white/5 flex items-center justify-between">
+                    <span className="font-bold text-xs tracking-widest uppercase text-white/90 font-sans">Decisioni & Logica</span>
+                    <span className="text-[10px] tracking-widest text-white/40 font-sans uppercase">
+                      LATEST ENGINE LOGS
+                    </span>
+                  </div>
+                  <div className="p-0 overflow-x-auto max-h-[300px] overflow-y-auto custom-scrollbar">
+                    {(!liveState?.recentDecisions || liveState.recentDecisions.length === 0) ? (
+                      <div className="p-16 flex flex-col items-center justify-center text-white/20 font-sans text-sm">
+                         Nessuna decisione recente
+                      </div>
+                    ) : (
+                      <table className="w-full text-left font-sans text-[11px] whitespace-nowrap">
+                        <thead className="text-white/30 text-[10px] font-bold tracking-widest border-b border-white/5 sticky top-0 bg-[#1A1C22]">
+                          <tr>
+                            <th className="px-6 py-4 font-normal uppercase">Time</th>
+                            <th className="px-6 py-4 font-normal uppercase">Symbol</th>
+                            <th className="px-6 py-4 font-normal uppercase">Action</th>
+                            <th className="px-6 py-4 font-normal uppercase">Direction</th>
+                            <th className="px-6 py-4 font-normal uppercase">Reason</th>
+                            <th className="px-6 py-4 font-normal uppercase">Price / Regime</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {liveState.recentDecisions.map((d: any, i: number) => {
+                            const isExecuted = d.action === 'TRADE_EXECUTED';
+                            const isSk = d.action.includes('SKIPPED');
+                            let actionColor = 'text-white/70';
+                            if (isExecuted) actionColor = 'text-[#10B981] font-bold';
+                            else if (isSk) actionColor = 'text-[#F43F5E]';
+                            else actionColor = 'text-[#FFB020]'; // BLOCKED
+
+                            return (
+                            <tr key={i} className="border-b border-white/5 hover:bg-white/[0.02] transition-colors">
+                              <td className="px-6 py-4 text-white/50">{new Date(d.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</td>
+                              <td className="px-6 py-4 text-white/90 font-semibold">{d.symbol?.replace('/','-')}</td>
+                              <td className={`px-6 py-4 ${actionColor}`}>{d.action}</td>
+                              <td className="px-6 py-4">
+                                  {d.direction ? (
+                                    <span className={`px-2 py-1 rounded border text-[9px] tracking-widest uppercase font-bold ${d.direction === 'LONG' ? 'bg-transparent text-[#10B981] border-[#10B981]/50' : 'bg-transparent text-[#F43F5E] border-[#F43F5E]/50'}`}>
+                                       {d.direction}
+                                    </span>
+                                  ) : '-'}
+                              </td>
+                              <td className="px-6 py-4 text-white/70 font-medium max-w-[300px] truncate" title={d.reason}>{d.reason}</td>
+                              <td className="px-6 py-4 text-white/50">{d.price ? `$${d.price.toFixed(2)}` : '-'} {d.regime ? `(${d.regime})` : ''}</td>
+                            </tr>
+                          )})}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                </div>
+
               </motion.div>
             ) : (
                             <motion.div 

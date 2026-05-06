@@ -60,6 +60,15 @@ export interface LiveState {
   orderIntents?: Record<string, OrderIntent>;
   positionLedger?: Record<string, PositionLedgerEntry>;
   lastSignalTimes?: Record<string, string>;
+  recentDecisions?: any[];
+}
+
+function logDecision(decision: any) {
+  if (!state.recentDecisions) state.recentDecisions = [];
+  state.recentDecisions.unshift({ time: new Date().toISOString(), ...decision });
+  if (state.recentDecisions.length > 50) {
+    state.recentDecisions = state.recentDecisions.slice(0, 50);
+  }
 }
 
 // Emulated virtual wallet state
@@ -1773,6 +1782,7 @@ export async function loopTick() {
                              event: "ORDER_SKIPPED_INVALID_SIZE", symbol,
                              amount: rawSize, reason: orderRes.reason, severity: "WARNING"
                           }));
+                          logDecision({ action: "ORDER_SKIPPED", symbol, direction: signal.direction, reason: `Invalid size (${orderRes.reason})`, price: features.price, regime: displayRegime });
                           continue;
                       }
 
@@ -1785,6 +1795,7 @@ export async function loopTick() {
                              maxGlobalExposure: MAX_GLOBAL_EXPOSURE,
                              severity: "WARNING"
                           }));
+                          logDecision({ action: "ORDER_SKIPPED", symbol, direction: signal.direction, reason: "Max Global Exposure Exceeded", price: features.price, regime: displayRegime });
                           continue;
                       }
                       
@@ -1793,6 +1804,7 @@ export async function loopTick() {
                       
                       if (finalSize > 0) {
                           console.log(`[ENTRY LAYER] Open ${symbol} ${signal.direction} at $${features.price}`);
+                          logDecision({ action: "TRADE_EXECUTED", symbol, direction: signal.direction, reason: `Passed Gatekeeper (${signal.engine || 'NORMAL'})`, price: features.price, regime: displayRegime });
                           
                           const positionId = `pos_${symbol.replace(/[^A-Z]/g, '')}_${Date.now()}`;
                           const clientOrderId = `entry_${positionId.substring(4)}`;
@@ -1905,6 +1917,7 @@ export async function loopTick() {
                       }
                   } else {
                       console.log(`[GATEKEEPER] Denied ${signal.direction} on ${symbol}: ${gate.reason}`);
+                      logDecision({ action: "GATEKEEPER_BLOCKED", symbol, direction: signal.direction, reason: gate.reason, price: features.price, regime: displayRegime });
                   }
               }
           }
