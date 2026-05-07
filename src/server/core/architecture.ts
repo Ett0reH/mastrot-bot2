@@ -626,12 +626,24 @@ export function generateNormalMarketSignals(context: SignalContext): SignalCandi
     const context: SignalContext = { features, regime, symbol, globalFeatures };
 
     // Orchestrate between Normal and Extreme based on macro regime
-    if (regime === "CRASH" || regime === "EUPHORIA") {
-      const extremeSignal = generateExtremeSignals(context);
+    // Global Regime Inheritance: If local is TRANSITION or basic BULL/BEAR, but BTC is EXTREME, 
+    // allow the coin to be checked for EXTREME setups (like shorting a global blow-off top).
+    const btcRegime = globalFeatures?.btcRegime;
+    const isGlobalExtreme = btcRegime === "CRASH" || btcRegime === "EUPHORIA";
+    const isLocalExtreme = regime === "CRASH" || regime === "EUPHORIA";
+
+    if (isLocalExtreme || isGlobalExtreme) {
+      // If global is extreme but local is not, we pass the global regime to the engine 
+      // so it can check RSI-based mean reversion targets.
+      const extremeContext = { 
+        ...context, 
+        regime: isLocalExtreme ? regime : (btcRegime as TradingRegime) 
+      };
+      const extremeSignal = generateExtremeSignals(extremeContext);
       if (extremeSignal.direction !== "NEUTRAL") return extremeSignal;
     }
     
-    // Default fallback to NORMAL engine for ALL regimes if extreme didn't trigger
+    // Default fallback to NORMAL engine
     const normalSignal = generateNormalMarketSignals(context);
     if (normalSignal.direction !== "NEUTRAL") return normalSignal;
 

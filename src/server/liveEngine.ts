@@ -222,12 +222,12 @@ export async function createProtectedLimitEntryOrder(params: {
         await updateIntentStatus(clientOrderId, IntentStatus.ACKNOWLEDGED);
 
         // Wait for execution or timeout
-        let filledAmount = 0;
-        let avgPrice = 0;
+        let filledAmount: number | null = 0;
+        let avgPrice: number | null = 0;
         const start = Date.now();
 
         while (Date.now() - start < timeoutMs) {
-            const order = await exchange.fetchOrder(clientOrderId, symbol);
+            const order = await exchange.fetchOrder(orderRes.id, symbol);
             if (order.status === 'closed') {
                 filledAmount = order.filled;
                 avgPrice = order.average;
@@ -236,22 +236,22 @@ export async function createProtectedLimitEntryOrder(params: {
             await new Promise(r => setTimeout(r, 2000));
         }
 
-        if (filledAmount === 0) {
+        if (filledAmount === 0 || filledAmount === null || filledAmount === undefined) {
             console.warn(`[LIMIT_ENTRY_TIMEOUT] Order not filled within ${timeoutMs}ms. Attempting cancellation...`);
             try {
-                await exchange.client.cancelOrder({ cliOrdId: clientOrderId });
-                const finalOrder = await exchange.fetchOrder(clientOrderId, symbol);
+                await exchange.client.cancelOrder({ order_id: orderRes.id });
+                const finalOrder = await exchange.fetchOrder(orderRes.id, symbol);
                 filledAmount = finalOrder.filled || 0;
                 avgPrice = finalOrder.average || 0;
             } catch (e) {
                 // If cancel fails, it might have just filled.
-                const finalOrder = await exchange.fetchOrder(clientOrderId, symbol);
+                const finalOrder = await exchange.fetchOrder(orderRes.id, symbol);
                 filledAmount = finalOrder.filled || 0;
                 avgPrice = finalOrder.average || 0;
             }
         }
 
-        if (filledAmount > 0) {
+        if (filledAmount !== null && filledAmount > 0) {
             const isPartial = filledAmount < amount;
             await updateIntentStatus(clientOrderId, isPartial ? IntentStatus.PARTIAL : IntentStatus.FILLED);
             console.log(`[LIMIT_ENTRY_${isPartial ? 'PARTIAL' : 'FILLED'}] ${symbol} | Amount: ${filledAmount} | Price: ${avgPrice}`);
@@ -275,6 +275,7 @@ export async function createProtectedLimitEntryOrder(params: {
 
             return { success: true, filledAmount, avgPrice, isPartial };
         } else {
+            logDecision({ action: "ORDER_SKIPPED", symbol, direction: side === 'buy' ? 'LONG' : 'SHORT', reason: "Entry Limit Order not filled (Timeout/Gap)", price: lastPrice, regime: "UNKNOWN" });
             await updateIntentStatus(clientOrderId, IntentStatus.CANCELED);
             console.error(`[ENTRY_NOT_FILLED_CANCELED] ${symbol} could not be entered.`);
             return { success: false, filledAmount: 0 };
@@ -540,9 +541,10 @@ class KrakenExchangeAdapter {
                     const reqSym = this.symbolToNative(symbol);
                     const inst = data.instruments.find((x: any) => x.symbol === reqSym);
                     if (inst) {
+                        const fallbackMin = symbol.includes('BTC') ? 0.001 : symbol.includes('ETH') ? 0.01 : symbol.includes('SOL') ? 0.1 : 1;
                         this.markets[symbol] = {
-                             limits: { amount: { min: parseFloat((inst as any).contractSize) || 1 }, cost: { min: 2.0 } },
-                             precision: { amount: 3 } // Placeholder while actual API schema unknown
+                             limits: { amount: { min: fallbackMin }, cost: { min: 2.0 } },
+                             precision: { amount: inst.contractValueTradePrecision || 3 }
                         };
                         console.log(`[Adapter] Configured ${symbol} market:`, this.markets[symbol]);
                     }
@@ -631,8 +633,6 @@ class KrakenExchangeAdapter {
     async ensureIsolatedLeverage(symbol: string, desiredLeverage: number) {
         console.log(`[LEVERAGE_SET_INTENT] Setting leverage to ${desiredLeverage}x for ${symbol}`);
         try {
-            // Kraken Futures documentation: PUT /leveragepreferences
-            // Using raw call if not explicitly in SDK version
             const symbolNative = this.symbolToNative(symbol);
             
             // Check if contract is compatible
@@ -640,18 +640,16 @@ class KrakenExchangeAdapter {
             const inst = instruments.instruments.find((x: any) => x.symbol === symbolNative);
             if (!inst) throw new Error(`Symbol ${symbol} not found on Kraken Futures`);
 
-            // @ts-ignore - Assuming the SDK might not have the typed method for this specific PUT endpoint yet
-            const res = await this.client.request('PUT', '/leveragepreferences', {
+            const res = await this.client.setLeverageSettings({
                 symbol: symbolNative,
-                maxLeverage: desiredLeverage,
-                marginMode: 'isolated' // Force isolated
+                maxLeverage: desiredLeverage
             });
 
             if (res.result === 'success') {
                 console.log(`[ISOLATED_MARGIN_CONFIRMED] Leverage set to ${desiredLeverage}x for ${symbol}`);
                 return true;
             }
-            throw new Error(res.error || "Unknown error setting leverage");
+            throw new Error((res as any).error || "Unknown error setting leverage");
         } catch (e: any) {
             if (e.message.includes('not found') || e.message.includes('404')) {
                 // Fallback: Some accounts might not support this endpoint yet or use global settings
@@ -1402,12 +1400,14 @@ export async function loopTick() {
             return;
         }
 
-        if (validBTC1H.length > 50 && validBTC4H.length > 200) {
+        if (validBTC1H.length > 50 && validBTC4H.length > 100) {
             console.log("Preparing features for BTC...");
             globalFeatures = MarketDataLayer.prepareFeatures(validBTC1H, validBTC4H, true);
             state.regime = RegimeLayer.detect(globalFeatures);
             btcLivePrice = validBTC1H[validBTC1H.length - 1].c;
-            console.log("BTC Features done:", state.regime);
+            console.log(`[Engine] Global Anchor (BTC) Regime: ${state.regime}`);
+        } else {
+            console.warn(`[Engine] Global Anchor (BTC) insufficient data: 1H=${validBTC1H.length}, 4H=${validBTC4H.length}`);
         }
     } catch(e) {
         console.error("Failed to parse BTC base regime anchor", e);
@@ -1728,10 +1728,13 @@ export async function loopTick() {
           const validSym1H = filterClosedCandles(sym1H, '1h', nowMs);
           const validSym4H = filterClosedCandles(sym4H, '4h', nowMs);
 
-        if (validSym1H.length > 50 && validSym4H.length > 200) {
+        if (validSym1H.length > 50 && validSym4H.length > 100) {
               // P6: Drift Detection for specific symbol
               const symFresh = await validateMarketDataFreshness(validSym1H, '1h');
-              if (!symFresh) continue;
+              if (!symFresh) {
+                  console.log(`[DRIFT_DETECT] ${symbol} data is stale. Skipping.`);
+                  continue;
+              }
 
               const features = MarketDataLayer.prepareFeatures(validSym1H, validSym4H, true);
               
@@ -1742,8 +1745,6 @@ export async function loopTick() {
               }
 
               const localRegime = RegimeLayer.detect(features);
-              
-              if (!state.regimes) state.regimes = {};
               state.regimes[symbol] = localRegime;
               
               const signal = SignalLayer.evaluate(features, localRegime as TradingRegime, symbol, { btcTrend1H: globalFeatures?.trend1H, btcRegime: state.regime as TradingRegime });
@@ -1754,9 +1755,9 @@ export async function loopTick() {
               if (signal.direction === 'NEUTRAL') {
                   const currentHour = new Date().getHours();
                   if (!state.lastSignalTimes) state.lastSignalTimes = {};
-                  // Heartbeat log once per symbol periodically (every 4 hours, or immediately on first boot)
+                  // Heartbeat log once per symbol periodically (every 1 hour, or immediately on first boot)
                   const hbKey = `${symbol}_HB`;
-                  if (!state.lastSignalTimes[hbKey] || (state.lastSignalTimes[hbKey] !== currentHour.toString() && currentHour % 4 === 0)) {
+                  if (!state.lastSignalTimes[hbKey] || (state.lastSignalTimes[hbKey] !== currentHour.toString() && currentHour % 1 === 0)) {
                       state.lastSignalTimes[hbKey] = currentHour.toString();
                       logDecision({ action: "SCANNING", symbol, direction: "NEUTRAL", reason: "Nessun setup statistico individuato", price: features.price, regime: displayRegime });
                   }
@@ -1815,8 +1816,7 @@ export async function loopTick() {
                       let realEntryPrice = features.price;
                       
                       if (finalSize > 0) {
-                          console.log(`[ENTRY LAYER] Open ${symbol} ${signal.direction} at $${features.price}`);
-                          logDecision({ action: "TRADE_EXECUTED", symbol, direction: signal.direction, reason: `Passed Gatekeeper (${signal.engine || 'NORMAL'})`, price: features.price, regime: displayRegime });
+                          console.log(`[ENTRY LAYER] Intent to open ${symbol} ${signal.direction} at $${features.price}`);
                           
                           const positionId = `pos_${symbol.replace(/[^A-Z]/g, '')}_${Date.now()}`;
                           const clientOrderId = `entry_${positionId.substring(4)}`;
@@ -1884,13 +1884,16 @@ export async function loopTick() {
                               } else {
                                   isLiveExecutionSuccess = false;
                                   delete state.positionLedger[positionId];
+                                  logDecision({ action: "ORDER_FAILED", symbol, direction: signal.direction, reason: "Entry timed out or rejected", price: features.price, regime: displayRegime });
                               }
                           } else {
                               // Visual/Paper simulation
                               finalFilledSize = finalSize;
                           }
                           
-                          if (isLiveExecutionSuccess) {
+                          if (isLiveExecutionSuccess && finalFilledSize > 0) {
+                              logDecision({ action: "TRADE_EXECUTED", symbol, direction: signal.direction, reason: `Passed Gatekeeper (${signal.engine || 'NORMAL'})`, price: realEntryPrice, regime: displayRegime });
+                              
                               const newPos: ActiveTrade = {
                                   id: positionId,
                                   symbol: symbol,
@@ -1933,8 +1936,10 @@ export async function loopTick() {
                       logDecision({ action: "GATEKEEPER_BLOCKED", symbol, direction: signal.direction, reason: gate.reason, price: features.price, regime: displayRegime });
                   }
               }
+          } else {
+              console.log(`[DATA_WAIT] ${symbol} not enough 1H (${validSym1H.length}/50) or 4H (${validSym4H.length}/100) closed bars.`);
           }
-       }
+    }
     }
 
     state.openPositions = simulatedPositions;

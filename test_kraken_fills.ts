@@ -8,9 +8,8 @@ async function test() {
         testnet: process.env.KRAKEN_SANDBOX === 'true' || process.env.KRAKEN_SANDBOX === undefined
     });
     try {
-        const logs = await client.getAccountLog();
-        const trades = logs.logs.filter((l: any) => l.info === 'trade' || l.realized_pnl !== null);
-        console.log("TRADES:", JSON.stringify(trades, null, 2));
+        const res = await client.getOpenOrders();
+        console.log("OPEN:", JSON.stringify(res.openOrders, null, 2));
     } catch(e) {
         console.log(e);
     }
