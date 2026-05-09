@@ -4,6 +4,7 @@ export interface LiveState {
   openPositions?: any[];
   recentTrades?: any[]; 
   balance?: number;
+  initialBalance?: number;
   regime?: string;
 }
 
@@ -16,16 +17,26 @@ export function calculateSnapshot(liveState: LiveState | null) {
   const eqHistory = liveState.equityHistory;
   const currentEq = liveState.balance || eqHistory[eqHistory.length - 1]?.equity || 10000;
   const eq = eqHistory.map(h => h.equity);
-  const startEq = 10000; 
+  const startEq = liveState.initialBalance || 10000; 
 
   const totalReturn = (currentEq - startEq) / startEq;
   
   const startTime = new Date(eqHistory[0].time).getTime();
   const endTime = new Date(eqHistory[eqHistory.length - 1].time).getTime();
   let elapsedYears = (endTime - startTime) / (1000 * 60 * 60 * 24 * 365.25);
-  if (elapsedYears < 0.0001) elapsedYears = 0.0001;
+  if (elapsedYears < 0.0027) elapsedYears = 0.0027; // Min 1 day to prevent exponential explosion
   
-  const cagr = Math.pow(currentEq / startEq, 1 / elapsedYears) - 1;
+  let cagr = 0;
+  const eqRatio = currentEq / startEq;
+  if (eqRatio > 0) {
+     cagr = Math.pow(eqRatio, 1 / elapsedYears) - 1;
+  } else {
+     cagr = -1; // -100%
+  }
+  // Cap at 1000 (100,000%) to prevent NaN/Infinity from skewing averages
+  if (cagr > 1000) cagr = 1000;
+  if (cagr < -1) cagr = -1;
+
   const netProfit = currentEq - startEq;
   
   // Trades info from realized history

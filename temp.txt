@@ -1,0 +1,71 @@
+702-        } else {
+703-            throw new Error("Failed to parse SL order ID");
+704-        }
+705-    }
+706-
+707:    async createMarketOrder(symbol: string, side: string, amount: number, price?: number, params: any = {}) {
+708-        const payload: any = {
+709-            symbol: this.symbolToNative(symbol),
+710-            side: side as 'buy' | 'sell',
+711-            size: amount,
+712-            orderType: 'mkt',
+--
+1155-    for (const p of state.openPositions) {
+1156-        if (process.env.LIVE_TRADING_ENABLED === 'true' && exchange) {
+1157-             const side = p.direction === 'LONG' ? 'sell' : 'buy';
+1158-             try {
+1159-                 console.log(`[LIVE EXECUTION] Sending ${side} exit order for ${p.symbol} on STOP...`);
+1160:                 await ccxtWithRetry(() => exchange.createMarketOrder(p.symbol, side, p.size, undefined, { reduceOnly: true }));
+1161-             } catch (e: any) {
+1162-                 console.error(`[LIVE EXECUTION] Failed to close ${p.symbol} on STOP:`, e.message);
+1163-             }
+1164-        }
+1165-    }
+--
+1210-      for (const p of livePos) {
+1211-         if (Math.abs(p.contracts) > 0) {
+1212-             const side = p.contracts > 0 ? 'sell' : 'buy';
+1213-             try {
+1214-                 console.error(`[EMERGENCY_KILL_SWITCH] Force-dropping live broker position ${p.symbol} (${p.contracts})...`);
+1215:                 await ccxtWithRetry(() => exchange.createMarketOrder(p.symbol, side, Math.abs(p.contracts), undefined, { reduceOnly: true }));
+1216-                 console.error(`[EMERGENCY_KILL_SWITCH] Successfully dropped ${p.symbol}.`);
+1217-             } catch (e: any) {
+1218-                 console.error(`[EMERGENCY_KILL_SWITCH] Failed to drop broker pos ${p.symbol}: ${e.message}`);
+1219-             }
+1220-         }
+--
+1224-         try {
+1225-             const exPos = livePos.find((x: any) => x.symbol === p.symbol);
+1226-             if (!exPos || Math.abs(exPos.contracts) === 0) {
+1227-                 console.error(`[EMERGENCY_KILL_SWITCH] Dropping local-only orphan ${p.symbol}...`);
+1228-                 const side = p.direction === 'LONG' ? 'sell' : 'buy';
+1229:                 await ccxtWithRetry(() => exchange.createMarketOrder(p.symbol, side, p.size, undefined, { reduceOnly: true }));
+1230-             }
+1231-         } catch (e: any) {}
+1232-      }
+1233-  }
+1234-
+--
+1250-    for (const p of state.openPositions) {
+1251-        if (process.env.LIVE_TRADING_ENABLED === 'true' && exchange) {
+1252-             const side = p.direction === 'LONG' ? 'sell' : 'buy';
+1253-             try {
+1254-                 console.log(`[LIVE EXECUTION] Sending ${side} exit order for ${p.symbol} on RESET...`);
+1255:                 await ccxtWithRetry(() => exchange.createMarketOrder(p.symbol, side, p.size, undefined, { reduceOnly: true }));
+1256-             } catch (e: any) {
+1257-                 console.error(`[LIVE EXECUTION] Failed to close ${p.symbol} on RESET:`, e.message);
+1258-             }
+1259-        }
+1260-    }
+--
+1564-                     isLiveExitSuccess = true;
+1565-                 } else {
+1566-                     const side = p.direction === 'LONG' ? 'sell' : 'buy';
+1567-                     try {
+1568-                     console.log(`[LIVE EXECUTION] Sending ${side} exit order for ${p.symbol} to Kraken Futures...`);
+1569:                     const order = await ccxtWithRetry(() => exchange.createMarketOrder(p.symbol, side, p.size, undefined, { reduceOnly: true }));
+1570-                     console.log(`[LIVE EXECUTION] Exit order successful:`, (order as any).id);
+1571-                 } catch(e: any) {
+1572-                     console.error(`[LIVE EXECUTION] Exit order failed for ${p.symbol}:`, e.message);
+1573-                     isLiveExitSuccess = false;
+1574-                     

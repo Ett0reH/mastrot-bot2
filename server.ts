@@ -9,7 +9,7 @@ import { startPaperTrading, stopPaperTrading, getLiveState, triggerCronTick, res
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
+  const PORT = 3000;
 
   app.use(express.json());
 
@@ -327,7 +327,7 @@ async function startServer() {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     // Use *all for Express v5, or * for Express v4
-    app.get('*', (req, res) => {
+    app.get('*all', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

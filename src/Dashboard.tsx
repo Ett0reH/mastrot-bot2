@@ -174,14 +174,15 @@ export default function Dashboard() {
 
   const chartData = useMemo(() => {
     let points = [];
-    if (!liveState?.equityHistory || liveState.equityHistory.length === 0) {
+    if (!liveState?.equityHistory || liveState?.equityHistory.length === 0) {
       const now = Date.now();
+      const current = liveState?.balance || 10000;
       points = [
-        { equity: 10000, timestamp: now - 1000 },
-        { equity: 10000, timestamp: now }
+        { equity: current, timestamp: now - 1000 },
+        { equity: current, timestamp: now }
       ];
     } else {
-      points = liveState.equityHistory.map((d: any) => ({
+      points = liveState?.equityHistory.map((d: any) => ({
         ...d,
         timestamp: new Date(d.time).getTime()
       }));
@@ -426,9 +427,9 @@ export default function Dashboard() {
                       <div className="text-xl md:text-2xl font-bold tracking-tight text-white/90">SESSION: {state.session}</div>
                     </div>
                     {liveState?.isActive ? (
-                      <div className={`px-4 py-1.5 rounded-full text-[11px] font-bold tracking-wider flex items-center gap-2 border ${liveState.status === 'ERROR_RECOVERING' ? 'bg-[#FFB020]/10 text-[#FFB020] border-[#FFB020]/30' : 'bg-[#10B981]/10 text-[#10B981] border-[#10B981]/30'}`}>
-                        <div className={`w-2 h-2 rounded-full ${liveState.status === 'ERROR_RECOVERING' ? 'bg-[#FFB020] animate-pulse' : 'bg-[#10B981]'}`}></div>
-                        {liveState.status === 'ERROR_RECOVERING' ? 'RECOVERING' : 'HEALTHY'}
+                      <div className={`px-4 py-1.5 rounded-full text-[11px] font-bold tracking-wider flex items-center gap-2 border ${liveState?.status === 'ERROR_RECOVERING' ? 'bg-[#FFB020]/10 text-[#FFB020] border-[#FFB020]/30' : 'bg-[#10B981]/10 text-[#10B981] border-[#10B981]/30'}`}>
+                        <div className={`w-2 h-2 rounded-full ${liveState?.status === 'ERROR_RECOVERING' ? 'bg-[#FFB020] animate-pulse' : 'bg-[#10B981]'}`}></div>
+                        {liveState?.status === 'ERROR_RECOVERING' ? 'RECOVERING' : 'HEALTHY'}
                       </div>
                     ) : (
                       <div className="px-4 py-1.5 rounded-full text-[11px] font-bold tracking-wider flex items-center gap-2 border bg-rose-500/10 text-rose-500 border-rose-500/30">
@@ -513,7 +514,14 @@ export default function Dashboard() {
                      </div>
                      <div className="pt-2">
                         <div className="text-white/90 text-2xl font-bold tracking-tight mb-0.5 font-sans">
-                          {liveState?.openPositions?.length > 0 ? '42%' : '0%'}
+                          {(() => {
+                            const marginUsed = liveState?.marginUsed !== undefined ? liveState?.marginUsed : 
+                              (liveState?.openPositions?.reduce((sum: number, p: any) => 
+                                sum + ((p.size || p.contracts || 0) * (p.entryPrice || 0) / (p.leverage || 1)), 0) || 0);
+                            
+                            const utilization = (marginUsed / (liveState?.balance || 10000)) * 100;
+                            return `${utilization.toFixed(1)}%`;
+                          })()}
                         </div>
                         <div className="text-white/40 text-[11px] font-sans">Margin Utilization</div>
                      </div>
@@ -532,7 +540,7 @@ export default function Dashboard() {
                           {(liveState?.openPositions?.length || 0).toString().padStart(2, '0')}
                         </div>
                         <div className="text-white/40 text-[11px] font-sans">
-                          Exposure: ${liveState?.openPositions?.reduce((sum: number, p: any) => sum + ((p.size || p.contracts || 0) * (p.entryPrice || 0) / (p.leverage || 1)), 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+                          Notional: ${liveState?.openPositions?.reduce((sum: number, p: any) => sum + ((p.size || p.contracts || 0) * (p.entryPrice || 0)), 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
                         </div>
                      </div>
                   </div>
@@ -552,7 +560,7 @@ export default function Dashboard() {
                            </span>
                         </div>
                         {/* Local Regimes */}
-                        {liveState?.regimes && Object.entries(liveState.regimes).map(([sym, reg]: [string, any]) => {
+                        {liveState?.regimes && Object.entries(liveState?.regimes).map(([sym, reg]: [string, any]) => {
                            const symParts = sym.split('/');
                            const displaySym = symParts[0] || sym;
                            return (
@@ -654,7 +662,7 @@ export default function Dashboard() {
                     </span>
                   </div>
                   <div className="p-0 overflow-x-auto">
-                    {(!liveState?.openPositions || liveState.openPositions.length === 0) ? (
+                    {(!liveState?.openPositions || liveState?.openPositions.length === 0) ? (
                       <div className="p-16 flex flex-col items-center justify-center text-white/20 font-sans text-sm">
                          No Active Positions found
                       </div>
@@ -673,7 +681,7 @@ export default function Dashboard() {
                           </tr>
                         </thead>
                         <tbody>
-                          {liveState.openPositions.map((p: any, i: number) => {
+                          {liveState?.openPositions.map((p: any, i: number) => {
                             const isLong = p.direction === 'LONG';
                             const trlDistPercent = Math.abs((p.currentStopLoss - p.entryPrice) / p.entryPrice * 100).toFixed(2);
                             return (
@@ -709,7 +717,7 @@ export default function Dashboard() {
                     </span>
                   </div>
                   <div className="p-0 overflow-x-auto max-h-[400px] overflow-y-auto custom-scrollbar">
-                    {(!liveState?.recentTrades || liveState.recentTrades.length === 0) ? (
+                    {(!liveState?.recentTrades || liveState?.recentTrades.length === 0) ? (
                       <div className="p-16 flex flex-col items-center justify-center text-white/20 font-sans text-sm">
                          No recent trades found
                       </div>
@@ -727,7 +735,7 @@ export default function Dashboard() {
                           </tr>
                         </thead>
                         <tbody>
-                          {liveState.recentTrades.map((t: any, i: number) => {
+                          {liveState?.recentTrades.map((t: any, i: number) => {
                             const isLong = t.side === 'LONG';
                             const isWin = t.pnl > 0;
                             return (
@@ -762,7 +770,7 @@ export default function Dashboard() {
                     </span>
                   </div>
                   <div className="p-0 overflow-x-auto max-h-[300px] overflow-y-auto custom-scrollbar">
-                    {(!liveState?.recentDecisions || liveState.recentDecisions.length === 0) ? (
+                    {(!liveState?.recentDecisions || liveState?.recentDecisions.length === 0) ? (
                       <div className="p-16 flex flex-col items-center justify-center text-white/20 font-sans text-sm">
                          Nessuna decisione recente
                       </div>
@@ -779,7 +787,7 @@ export default function Dashboard() {
                           </tr>
                         </thead>
                         <tbody>
-                          {liveState.recentDecisions.map((d: any, i: number) => {
+                          {liveState?.recentDecisions.map((d: any, i: number) => {
                             const isExecuted = d.action === 'TRADE_EXECUTED';
                             const isSk = d.action.includes('SKIPPED');
                             let actionColor = 'text-white/70';
@@ -893,7 +901,7 @@ export default function Dashboard() {
                       icon: <GitBranch className="w-3.5 h-3.5 text-[#10B981]" />,
                       items: [
                         { label: 'Recovery Factor', key: 'recoveryFactor', fmt: (v: number) => v.toFixed(2), polarity: true, defaultColor: 'text-[#10B981]' },
-                        { label: 'Time Under Water', key: 'timeUnderWater', fmt: (v: number) => `${Math.floor(v/60)}h ${v%60}m`, polarity: false, defaultColor: 'text-white/70' },
+                        { label: 'Time Under Water', key: 'timeUnderWater', fmt: (v: number) => `${Math.floor(v/60)}h ${Math.floor(v%60)}m`, polarity: false, defaultColor: 'text-white/70' },
                         { label: 'Max DD Duration', key: 'maxDDDuration', fmt: (v: number) => `${Math.floor(v/60)}m ${(v%60).toFixed(0).padStart(2,'0')}s`, polarity: false, defaultColor: 'text-[#F43F5E]' },
                         { label: 'Stability by regime', key: 'stabilityByRegime', fmt: (v: string) => v, polarity: false, defaultColor: 'text-[#93C5FD]' },
                         { label: 'Out-of-sample perf.', key: 'oosPerformance', fmt: (v: string) => v, polarity: false, defaultColor: 'text-[#10B981]' },
@@ -968,16 +976,39 @@ export default function Dashboard() {
 
                     <div className="flex flex-col gap-3 mt-8 w-full text-[10px] font-sans border-t border-white/5 pt-6">
                       <div className="flex justify-between items-center w-full">
-                         <span className="text-white/40 tracking-widest uppercase font-bold">Uptime</span>
-                         <span className="text-white/90 font-mono text-[11px] font-medium">14d 02h 11m</span>
+                         <span className="text-white/40 tracking-widest uppercase font-bold">Exchange Link</span>
+                         <span className={`${liveState?.krakenStatus?.connected ? 'text-[#10B981]' : 'text-[#F43F5E]'} font-mono text-[11px] font-medium`}>
+                            {liveState?.krakenStatus?.connected ? 'CONNECTED' : 'DISCONNECTED'}
+                         </span>
+                      </div>
+                      {liveState?.krakenStatus?.lastError && (
+                        <div className="text-[#F43F5E]/60 text-[9px] font-mono break-words mb-1 max-h-12 overflow-y-auto">
+                          Error: {liveState?.krakenStatus?.lastError}
+                        </div>
+                      )}
+                      <div className="flex justify-between items-center w-full">
+                         <span className="text-white/40 tracking-widest uppercase font-bold">Last Engine Tick</span>
+                         <span className="text-white/90 font-mono text-[11px] font-medium">
+                            {liveState?.lastUpdate ? new Date(liveState?.lastUpdate).toLocaleTimeString() : 'N/A'}
+                         </span>
                       </div>
                       <div className="flex justify-between items-center w-full">
-                         <span className="text-white/40 tracking-widest uppercase font-bold">Signal Strength</span>
-                         <span className="text-[#10B981] font-mono text-[11px] font-medium">98.4%</span>
+                         <span className="text-white/40 tracking-widest uppercase font-bold">Session Start</span>
+                         <span className="text-white/90 font-mono text-[11px] font-medium">
+                            {liveState?.startTime ? new Date(liveState?.startTime).toLocaleString() : 'N/A'}
+                         </span>
                       </div>
                       <div className="flex justify-between items-center w-full">
-                         <span className="text-white/40 tracking-widest uppercase font-bold">Risk Cap</span>
-                         <span className="text-white/90 font-mono text-[11px] font-medium">$12,000.00</span>
+                         <span className="text-white/40 tracking-widest uppercase font-bold">Sharpe Ratio</span>
+                         <span className="text-[#10B981] font-mono text-[11px] font-medium">
+                            {metrics?.t0?.sharpe?.toFixed(2) || '0.00'}
+                         </span>
+                      </div>
+                      <div className="flex justify-between items-center w-full">
+                         <span className="text-white/40 tracking-widest uppercase font-bold">Profit Factor</span>
+                         <span className="text-white/90 font-mono text-[11px] font-medium">
+                            {metrics?.t0?.profitFactor?.toFixed(2) || '0.00'}
+                         </span>
                       </div>
                     </div>
 

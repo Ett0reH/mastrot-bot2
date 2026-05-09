@@ -89,7 +89,7 @@ async function fetch15mData(
   }
 
   const cacheFileName = `${symbol.replace("/", "_")}_15Min_${start.split("T")[0]}_${end.split("T")[0]}.json`;
-  const megaCacheFile = path.join(cacheDir, `${symbol.replace("/", "_")}_15Min_2026-03-01_2026-05-05.json`);
+  const megaCacheFile = path.join(cacheDir, `${symbol.replace("/", "_")}_15Min_2026-04-20_2026-05-05.json`);
   const cacheFilePath = fs.existsSync(megaCacheFile) ? megaCacheFile : path.join(cacheDir, cacheFileName);
 
   let allBars: Bar[] = [];
@@ -193,7 +193,7 @@ async function fetch15mData(
 async function runEventDrivenBacktest() {
   process.env.BACKTEST_MODE = "true";
   console.log("--- MULTI-YEAR SIMULATION ARCHITECTURE V2 (MAX PERIOD) ---");
-  const start = "2026-03-01T00:00:00Z";
+  const start = "2026-04-20T00:00:00Z";
   const end = "2026-05-05T00:00:00Z";
 
   // FASE 3: Load Expectancy Matrix

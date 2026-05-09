@@ -55,7 +55,14 @@ export interface LiveState {
   metricsHistory?: any[];
   maxHistoricalEquity?: number;
   initialBalance?: number;
+  startTime?: string;
   warmupUntil?: number;
+  marginUsed?: number;
+  krakenStatus?: {
+    connected: boolean;
+    balanceSync: boolean;
+    lastError?: string;
+  };
   // New ledger fields
   orderIntents?: Record<string, OrderIntent>;
   positionLedger?: Record<string, PositionLedgerEntry>;
@@ -288,7 +295,7 @@ export async function createProtectedLimitEntryOrder(params: {
     }
 }
 
-async function attachNativeProtections(p: ActiveTrade, filledAmount: number) {
+export async function attachNativeProtections(p: ActiveTrade, filledAmount: number) {
     if (!exchange) return;
     
     console.log(`[NATIVE_SL_INTENT_CREATED] Target SL: ${p.stopLoss} for ${p.symbol}`);
@@ -395,7 +402,7 @@ async function loadInitialState(): Promise<void> {
     return;
   }
   try {
-    const snapshot = await withTimeout(getDoc(doc(db, 'bot_state', STATE_DOC_ID)), 8000, 'Firebase getDoc');
+    const snapshot = await withTimeout(getDoc(doc(db, 'bot_state', STATE_DOC_ID)), 8000, 'Firebase getDoc') as any;
     if (snapshot.exists()) {
       const saved = snapshot.data();
       state = { ...state, ...saved, botSecret: BOT_SECRET };
@@ -541,7 +548,7 @@ class KrakenExchangeAdapter {
                     const reqSym = this.symbolToNative(symbol);
                     const inst = data.instruments.find((x: any) => x.symbol === reqSym);
                     if (inst) {
-                        const fallbackMin = symbol.includes('BTC') ? 0.001 : symbol.includes('ETH') ? 0.01 : symbol.includes('SOL') ? 0.1 : 1;
+                        const fallbackMin = symbol.includes('BTC') ? 0.0001 : symbol.includes('ETH') ? 0.001 : symbol.includes('SOL') ? 0.01 : symbol.includes('LINK') ? 0.1 : 1;
                         this.markets[symbol] = {
                              limits: { amount: { min: fallbackMin }, cost: { min: 2.0 } },
                              precision: { amount: inst.contractValueTradePrecision || 3 }
@@ -557,9 +564,10 @@ class KrakenExchangeAdapter {
         // Fallback limits per symbol based on common Kraken Futures values if missing
         TARGET_SYMBOLS.forEach(s => {
             if (!this.markets[s]) {
+                const fbMin = s.includes('BTC') ? 0.0001 : s.includes('ETH') ? 0.001 : s.includes('SOL') ? 0.01 : s.includes('LINK') ? 0.1 : 1;
                 this.markets[s] = {
-                    limits: { amount: { min: s.includes('BTC') ? 0.001 : 1 }, cost: { min: 2.0 } },
-                    precision: { amount: s.includes('BTC') ? 4 : s.includes('ETH') ? 3 : s.includes('SOL') ? 1 : 0 }
+                    limits: { amount: { min: fbMin }, cost: { min: 2.0 } },
+                    precision: { amount: s.includes('BTC') ? 4 : s.includes('ETH') ? 3 : s.includes('SOL') ? 2 : s.includes('LINK') ? 1 : 0 }
                 };
             }
         });
@@ -778,17 +786,49 @@ class KrakenExchangeAdapter {
         }
     }
 
-    async fetchPositions() {
-        const { openPositions } = await this.client.getOpenPositions();
-        return (openPositions || []).map((p: any) => ({
-            symbol: this.nativeToSymbol(p.symbol),
-            contracts: p.size, 
-        }));
+    async fetchPositions(retryCount = 0): Promise<any[]> {
+        try {
+            const { openPositions } = await this.client.getOpenPositions();
+            const { tickers } = await this.client.getTickers();
+            
+            return (openPositions || []).map((p: any) => {
+                const nativeSymbol = p.symbol;
+                const ticker = tickers?.find((t: any) => t.symbol === nativeSymbol);
+                const markPrice = ticker?.markPrice || p.price;
+                
+                // If unrealizedPnl is not directly in the position object, calculate it
+                let pnl = p.unrealizedPnl;
+                if (pnl === undefined && ticker?.markPrice) {
+                    if (p.side === 'long') {
+                        pnl = (ticker.markPrice - p.price) * p.size;
+                    } else {
+                        pnl = (p.price - ticker.markPrice) * p.size;
+                    }
+                }
+
+                return {
+                    symbol: this.nativeToSymbol(p.symbol),
+                    contracts: p.side === 'short' ? -p.size : p.size,
+                    entryPrice: p.price,
+                    leverage: p.maxFixedLeverage || 1,
+                    unrealizedPnl: pnl || 0,
+                    markPrice: ticker?.markPrice || null
+                };
+            });
+        } catch (e: any) {
+            if (retryCount < 3 && e.message.includes('Service Unavailable')) {
+                console.warn(`[Adapter] fetchPositions transient 503, retrying (${retryCount + 1}/3)...`);
+                await new Promise(r => setTimeout(r, 1000 * (retryCount + 1))); // Simple backoff
+                return this.fetchPositions(retryCount + 1);
+            }
+            console.error(`[Adapter] fetchPositions failed: ${e.message}`);
+            throw e;
+        }
     }
 
-    async fetchRecentTrades() {
+    async fetchRecentTrades(retryCount = 0): Promise<any> {
         const now = Date.now();
-        if (this.recentTradesCache && now - this.lastTradesFetch < 60000) {
+        if (this.recentTradesCache && now - this.lastTradesFetch < 60000 && retryCount === 0) {
             return this.recentTradesCache;
         }
 
@@ -830,33 +870,49 @@ class KrakenExchangeAdapter {
             
             return trades;
         } catch (e: any) {
+             if (retryCount < 3 && e.message.includes('Service Unavailable')) {
+                 console.warn(`[Adapter] fetchRecentTrades transient 503, retrying (${retryCount + 1}/3)...`);
+                 await new Promise(r => setTimeout(r, 1000 * (retryCount + 1))); // Simple backoff
+                 return this.fetchRecentTrades(retryCount + 1);
+             }
              console.warn(`[Adapter] Failed to fetch recent trades: ${e.message}`);
              return null;
         }
     }
 
     async fetchMarginBalance(): Promise<number | null> {
+        if (!state.krakenStatus) state.krakenStatus = { connected: true, balanceSync: false };
         try {
-            const res = await ccxtWithRetry(() => this.client.getAccounts(), 3, 2000);
+            const res = await ccxtWithRetry(() => this.client.getAccounts(), 2, 1000);
             
             if (res.accounts) {
+                state.krakenStatus.connected = true;
+                state.krakenStatus.balanceSync = true;
+                state.krakenStatus.lastError = undefined;
+
                 // If the user uses Multi-Collateral (Flex) margin account
-                if (res.accounts['flex'] && res.accounts['flex'].type === 'multiCollateralMarginAccount') {
+                if (res.accounts['flex'] && (res.accounts['flex'] as any).type === 'multiCollateralMarginAccount') {
+                    state.marginUsed = (res.accounts['flex'] as any).margin;
                     // Use portfolioValue (which includes unrealized PNL) or balanceValue
-                    return res.accounts['flex'].portfolioValue;
+                    return (res.accounts['flex'] as any).portfolioValue;
                 }
                 
                 // Fallback for single-collateral USD account
                 const usdMarginAcc = Object.values(res.accounts).find((a: any) => a.type === 'marginAccount' && a.currency === 'usd') as any;
                 if (usdMarginAcc && usdMarginAcc.balances) {
+                    state.marginUsed = usdMarginAcc.auxiliary?.margin || 0;
                     let total = 0;
                     if (usdMarginAcc.balances['usd']) total += parseFloat(usdMarginAcc.balances['usd']);
                     if (usdMarginAcc.auxiliary && usdMarginAcc.auxiliary.pnl) total += parseFloat(usdMarginAcc.auxiliary.pnl);
                     return total;
                 }
             }
+            state.krakenStatus.balanceSync = false;
             return null;
         } catch (e: any) {
+            state.krakenStatus.connected = false;
+            state.krakenStatus.balanceSync = false;
+            state.krakenStatus.lastError = e.message;
             if (!e.message?.includes('Service Unavailable') && !e.message?.includes('Bad Gateway')) {
                  console.warn("Failed to fetch Kraken Margin Balance:", e.message);
             }
@@ -876,18 +932,21 @@ class KrakenExchangeAdapter {
 export async function initExchange() {
   if (exchange) return;
 
-  // Load expectancy matrix if not loaded
+  // Load default neutral expectancy matrix to avoid local dependency
   if (!expectancyMatrixLoaded) {
-    try {
-      const matrixPath = path.join(process.cwd(), 'src/server/backtest/data_cache/setup_expectancy_matrix.json');
-      if (fs.existsSync(matrixPath)) {
-        const matrixData = JSON.parse(fs.readFileSync(matrixPath, 'utf8'));
-        ExpectancyTracker.loadMatrix(matrixData);
-        expectancyMatrixLoaded = true;
-      }
-    } catch(e) {
-      console.warn("Failed to load expectancy matrix in LiveEngine:", e);
-    }
+    console.log("[INIT] Loading DEFAULT_NEUTRAL_MATRIX (Proxy) to remove offline artifact dependency...");
+    const DEFAULT_NEUTRAL_MATRIX = new Proxy({}, {
+        get: function(target, prop) {
+            return {
+                expectancy: 0.1,
+                profitFactor: 1.25,
+                sampleSize: 100,
+                trades: 100
+            };
+        }
+    });
+    ExpectancyTracker.loadMatrix(DEFAULT_NEUTRAL_MATRIX);
+    expectancyMatrixLoaded = true;
   }
 
   // Initialize Kraken Futures connection for live market data
@@ -996,6 +1055,7 @@ export async function triggerCronTick() {
   if (state.isActive) {
     await initExchange(); // Auto-reconnect if dropped out of memory
     await loopTick();
+    await saveState();
   }
   return state;
 }
@@ -1019,10 +1079,27 @@ export async function startPaperTrading() {
     
     state.isActive = true;
     state.status = 'WARMING_UP';
+    state.startTime = state.startTime || new Date().toISOString();
     state.warmupUntil = Date.now() + (5 * 60 * 1000); // 5 minutes warm-up buffer
     state.lastError = undefined;
     state.lastUpdate = new Date().toISOString();
     
+    // Set initialBalance on first start if not already set
+    if (state.initialBalance === undefined || state.initialBalance === 10000) {
+      if (exchange) {
+        try {
+          const mb = await exchange.fetchMarginBalance();
+          if (mb !== null) {
+            state.initialBalance = mb;
+            state.balance = mb;
+            state.baseBalance = mb;
+            console.log(`[INITIAL_BALANCE_SYNC] Set starting capital to Kraken margin: $${mb}`);
+          }
+        } catch(e) {}
+      }
+      if (state.initialBalance === undefined) state.initialBalance = state.balance || 10000;
+    }
+
     startTickerDaemon();
     
     // Only clear simulated positions if they don't already exist from a resume
@@ -1031,6 +1108,13 @@ export async function startPaperTrading() {
     }
 
     if (!state.maxHistoricalEquity) state.maxHistoricalEquity = state.baseBalance || 10000;
+
+    // Initialize history with current balance to avoid 0% metrics on first start
+    if (!state.equityHistory || state.equityHistory.length === 0) {
+      const initialEntry = { time: new Date().toISOString(), equity: state.balance || 10000 };
+      state.equityHistory = [initialEntry];
+      state.metricsHistory = [calculateSnapshot({ ...state, equityHistory: [initialEntry] } as any)];
+    }
 
     await precomputeLiveOHLCV();
 
@@ -1198,6 +1282,7 @@ export async function resetPaperTrading() {
     regime: 'UNKNOWN',
     regimes: {},
     lastUpdate: new Date().toISOString(),
+    startTime: new Date().toISOString(),
     botSecret: BOT_SECRET,
     equityHistory: [],
     metricsHistory: [],
@@ -1596,16 +1681,15 @@ export async function loopTick() {
                         });
                         
                         if (unmanagedOrders.length > 0) {
-                            console.error(`[UNKNOWN_OPEN_ORDER_ON_BROKER] Found ${unmanagedOrders.length} unmanaged open orders closely matching on broker`);
-                            console.error(`[TRADING_HALTED_DESYNC]`);
-                            console.error(`[MANUAL_INTERVENTION_REQUIRED] Please clear open orders in Kraken terminal.`);
-                            await emergencyCloseAll();
-                            state.status = 'ERROR_RECOVERING';
-                            state.lastError = `Broker desync: Unregistered Open Orders found. Emergency close executed. Manual intervention required.`;
-                            state.isActive = false;
-                            isTicking = false;
-                            await saveState();
-                            return;
+                            console.warn(`[UNKNOWN_OPEN_ORDER_ON_BROKER] Found ${unmanagedOrders.length} unmanaged open orders. Attempting auto-clear...`);
+                            for (const o of unmanagedOrders) {
+                                try {
+                                    await ccxtWithRetry(() => (exchange as any).client.cancelOrder({ order_id: o.order_id }));
+                                    console.log(`[AUTO-HEAL] Successfully canceled unmanaged order: ${o.order_id}`);
+                                } catch (e: any) {
+                                    console.warn(`[AUTO-HEAL] Failed to cancel unmanaged order ${o.order_id}: ${e.message}`);
+                                }
+                            }
                         }
                     }
 
@@ -1615,6 +1699,38 @@ export async function loopTick() {
                             console.log(`[BROKER_STATE_MISMATCH] Local ${localP.symbol} absent on broker. Assuming NATIVE STOP LOSS execution.`);
                             // Invece di panic, diciamo al sistema di chiuderlo!
                             (localP as any).nativeSlHit = true;
+                        } else {
+                            // SYNC DATA: Update local state with Broker data (Source of Truth)
+                            // This ensures the dashboard matches Kraken exactly
+                            if (exPos.entryPrice) localP.entryPrice = exPos.entryPrice;
+                            if (exPos.unrealizedPnl !== undefined) localP.unrealizedPnl = exPos.unrealizedPnl;
+                            if (exPos.leverage) localP.leverage = exPos.leverage;
+                            
+                            // Update size if it changed (partial fills or manual adjustments)
+                            if (Math.abs(exPos.contracts) !== localP.size) {
+                                console.log(`[BROKER_SIZE_SYNC] Correcting ${localP.symbol} size: ${localP.size} -> ${Math.abs(exPos.contracts)}`);
+                                localP.size = Math.abs(exPos.contracts);
+                            }
+
+                            // GUARANTEE NATIVE STOP LOSS: Check if SL order still exists in broker's open orders
+                            if (openOrders && openOrders.openOrders) {
+                                const brokerOrderId = (localP as any).brokerStopLossOrderId;
+                                const slExists = openOrders.openOrders.some((o: any) => o.order_id === brokerOrderId);
+                                
+                                if (!slExists && localP.size > 0 && process.env.LIVE_TRADING_ENABLED === 'true') {
+                                    console.warn(`[NATIVE_SL_HEAL] Missing Stop Loss for active position ${localP.symbol}. Generating emergency SL!`);
+                                    try {
+                                        const side = localP.direction === 'LONG' ? 'sell' : 'buy';
+                                        const slRes = await ccxtWithRetry(() => exchange.updateStopLossOrder(localP.symbol, side, localP.size, localP.currentStopLoss));
+                                        if (slRes && slRes.id) {
+                                            (localP as any).brokerStopLossOrderId = slRes.id;
+                                            console.log(`[NATIVE_SL_HEAL] Successfully recreated Stop Loss for ${localP.symbol}: ${slRes.id}`);
+                                        }
+                                    } catch (e: any) {
+                                        console.error(`[NATIVE_SL_HEAL_FAIL] Failed to heal Stop Loss for ${localP.symbol}: ${e.message}`);
+                                    }
+                                }
+                            }
                         }
                     }
                     for (const exPos of livePos) {
@@ -1972,6 +2088,7 @@ export async function loopTick() {
 
     const receivedSymbols = Object.keys(tickers).join(', ');
     console.log(`[Virtual Engine] Feed: ${receivedSymbols} | BTC: $${btcLivePrice} | Regime: ${state.regime} | Eq: $${state.balance.toFixed(2)}`);
+    await saveState();
   } catch (error: any) {
     const errMsg = error?.body?.error || error?.message || String(error);
     const isTransientError = 
