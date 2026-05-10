@@ -575,15 +575,30 @@ class KrakenExchangeAdapter {
     }
 
     private symbolToNative(symbol: string) {
-        let base = symbol.split('/')[0];
+        let isInverse = symbol.endsWith('_PI');
+        let cleanSym = symbol.replace('_PI', '');
+        let base = cleanSym.split('/')[0];
+        let quote = 'USD';
+        if (cleanSym.includes('EUR')) quote = 'EUR';
         if (base === 'BTC') base = 'XBT';
-        return `PF_${base}USD`;
+        
+        return `${isInverse ? 'PI_' : 'PF_'}${base}${quote}`;
     }
 
     private nativeToSymbol(native: string) {
-        let base = native.replace('PF_', '').replace('USD', '');
-        if (base === 'XBT') base = 'BTC';
-        return `${base}/USD:USD`;
+        let isInverse = native.startsWith('PI_');
+        let clean = native.replace(/^PF_/, '').replace(/^PI_/, '').replace(/^FI_/, '');
+        let quote = 'USD';
+        
+        if (clean.endsWith('USD')) {
+            clean = clean.replace(/USD$/, '');
+        } else if (clean.endsWith('EUR')) {
+            clean = clean.replace(/EUR$/, '');
+            quote = 'EUR';
+        }
+        
+        if (clean === 'XBT') clean = 'BTC';
+        return `${clean}/${quote}:${quote}${isInverse ? '_PI' : ''}`;
     }
 
     async fetchTicker(symbol: string) {
@@ -788,8 +803,8 @@ class KrakenExchangeAdapter {
 
     async fetchPositions(retryCount = 0): Promise<any[]> {
         try {
-            const { openPositions } = await this.client.getOpenPositions();
-            const { tickers } = await this.client.getTickers();
+            const { openPositions } = await ccxtWithRetry(() => this.client.getOpenPositions(), 2, 500);
+            const { tickers } = await ccxtWithRetry(() => this.client.getTickers(), 2, 500);
             
             return (openPositions || []).map((p: any) => {
                 const nativeSymbol = p.symbol;
@@ -834,8 +849,8 @@ class KrakenExchangeAdapter {
 
         try {
             const [logsRes, fillsRes] = await Promise.all([
-                this.client.getAccountLog(),
-                this.client.getFills()
+                ccxtWithRetry(() => this.client.getAccountLog(), 2, 500),
+                ccxtWithRetry(() => this.client.getFills(), 2, 500)
             ]);
             
             const logs = logsRes?.logs || [];
@@ -892,30 +907,35 @@ class KrakenExchangeAdapter {
 
                 // If the user uses Multi-Collateral (Flex) margin account
                 if (res.accounts['flex'] && (res.accounts['flex'] as any).type === 'multiCollateralMarginAccount') {
-                    state.marginUsed = (res.accounts['flex'] as any).margin;
+                    state.marginUsed = (res.accounts['flex'] as any).initialMargin || 0; // Fixed fallback
                     // Use portfolioValue (which includes unrealized PNL) or balanceValue
                     return (res.accounts['flex'] as any).portfolioValue;
                 }
                 
-                // Fallback for single-collateral USD account
-                const usdMarginAcc = Object.values(res.accounts).find((a: any) => a.type === 'marginAccount' && a.currency === 'usd') as any;
-                if (usdMarginAcc && usdMarginAcc.balances) {
-                    state.marginUsed = usdMarginAcc.auxiliary?.margin || 0;
-                    let total = 0;
-                    if (usdMarginAcc.balances['usd']) total += parseFloat(usdMarginAcc.balances['usd']);
-                    if (usdMarginAcc.auxiliary && usdMarginAcc.auxiliary.pnl) total += parseFloat(usdMarginAcc.auxiliary.pnl);
-                    return total;
+                const marginAccs = Object.values(res.accounts).filter((a: any) => a.type === 'marginAccount') as any[];
+                if (marginAccs.length > 0) {
+                    let totalVal = 0;
+                    let totalUsed = 0;
+                    for (const acc of marginAccs) {
+                        const cur = acc.currency || 'usd';
+                        let val = 0;
+                        if (acc.balances && acc.balances[cur]) val += parseFloat(acc.balances[cur]);
+                        if (acc.auxiliary && acc.auxiliary.pnl) val += parseFloat(acc.auxiliary.pnl);
+                        totalVal += val;
+                        totalUsed += (acc.auxiliary?.margin || 0);
+                    }
+                    state.marginUsed = totalUsed;
+                    return totalVal;
                 }
             }
             state.krakenStatus.balanceSync = false;
+            console.warn("[Adapter] fetchMarginBalance missing valid account structure");
             return null;
         } catch (e: any) {
             state.krakenStatus.connected = false;
             state.krakenStatus.balanceSync = false;
-            state.krakenStatus.lastError = e.message;
-            if (!e.message?.includes('Service Unavailable') && !e.message?.includes('Bad Gateway')) {
-                 console.warn("Failed to fetch Kraken Margin Balance:", e.message);
-            }
+            state.krakenStatus.lastError = "Margin Fetch Error: " + e.message;
+            console.error(`[Adapter] Failed to fetch Kraken Margin Balance: ${e.message}`);
             return null;
         }
     }
@@ -1186,7 +1206,7 @@ export async function emergencyCloseAll() {
                 console.error(`[EMERGENCY_KILL_SWITCH] Cleared all open orders.`);
            } else {
                 // Try fetch and cancel fallback
-                const openOrders = await exchange.client.getOpenOrders ? await exchange.client.getOpenOrders() : { openOrders: [] };
+                const openOrders = await exchange.client.getOpenOrders ? await ccxtWithRetry(() => exchange.client.getOpenOrders(), 2, 500) : { openOrders: [] };
                 if (openOrders.openOrders) {
                     for (const o of openOrders.openOrders) {
                         try {
@@ -1672,7 +1692,7 @@ export async function loopTick() {
                     }
                     
                     const livePos = await exchange.fetchPositions();
-                    const openOrders = await exchange.client.getOpenOrders ? await exchange.client.getOpenOrders() : { openOrders: [] };
+                    const openOrders = await exchange.client.getOpenOrders ? await ccxtWithRetry(() => exchange.client.getOpenOrders(), 2, 500) : { openOrders: [] };
                     
                     if (openOrders.openOrders && openOrders.openOrders.length > 0) {
                         const unmanagedOrders = openOrders.openOrders.filter((o: any) => {
@@ -1684,7 +1704,7 @@ export async function loopTick() {
                             console.warn(`[UNKNOWN_OPEN_ORDER_ON_BROKER] Found ${unmanagedOrders.length} unmanaged open orders. Attempting auto-clear...`);
                             for (const o of unmanagedOrders) {
                                 try {
-                                    await ccxtWithRetry(() => (exchange as any).client.cancelOrder({ order_id: o.order_id }));
+                                    await ccxtWithRetry(() => exchange.client.cancelOrder({ order_id: o.order_id }), 2, 500);
                                     console.log(`[AUTO-HEAL] Successfully canceled unmanaged order: ${o.order_id}`);
                                 } catch (e: any) {
                                     console.warn(`[AUTO-HEAL] Failed to cancel unmanaged order ${o.order_id}: ${e.message}`);

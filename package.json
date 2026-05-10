@@ -31,7 +31,7 @@
   },
   "devDependencies": {
     "@firebase/eslint-plugin-security-rules": "^0.0.2",
-    "@siebly/kraken-api": "^1.0.0",
+    "@siebly/kraken-api": "^1.0.5",
     "@types/canvas-confetti": "^1.9.0",
     "@types/express": "^5.0.6",
     "@types/node": "^20.11.25",

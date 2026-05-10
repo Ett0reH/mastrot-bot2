@@ -15,37 +15,30 @@ async function startServer() {
 
   app.get("/api/debug-kraken", async (req, res) => {
     try {
-      const exchange = new ccxt.krakenfutures({
-        apiKey: process.env.KRAKEN_API_KEY,
-        secret: process.env.KRAKEN_SECRET_KEY,
+      const { DerivativesClient } = await import('@siebly/kraken-api');
+      const apiKey = process.env.KRAKEN_API_KEY;
+      const secret = process.env.KRAKEN_SECRET_KEY;
+      
+      const client = new DerivativesClient({
+          apiKey: apiKey,
+          apiSecret: secret,
+          strictParamValidation: true,
+          testnet: process.env.KRAKEN_SANDBOX === 'true'
       });
-      await exchange.loadMarkets();
       
-      const p = 0.105;
-      const targetAlloc = 500;
-      const sizeDoge = targetAlloc / p;
-      const finalDoge = Number(exchange.amountToPrecision('DOGE/USD:USD', sizeDoge));
-      
-      const pBtc = 76000;
-      const sizeBtc = targetAlloc / pBtc;
-      let finalBtc = 0;
-      try {
-        finalBtc = Number(exchange.amountToPrecision('BTC/USD:USD', sizeBtc));
-      } catch(e) {}
-      
-      let reqDoge = null;
-      try {
-        reqDoge = exchange.createOrderRequest('DOGE/USD:USD', 'market', 'buy', finalDoge);
-      } catch(e) {}
+      const accounts = await client.getAccounts();
+      const positions = await client.getOpenPositions();
       
       res.json({
-        finalDoge,
-        reqDoge,
-        finalBtc,
-        targetAlloc
+         status: "success",
+         krakenSandbox: process.env.KRAKEN_SANDBOX,
+         keyConfigured: !!apiKey,
+         secretConfigured: !!secret,
+         accounts: accounts,
+         positions: positions
       });
-    } catch (e: any) {
-      res.json({ error: e.message });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message, stack: error.stack, response: error?.response?.data || error?.body || error?.data || error });
     }
   });
 
