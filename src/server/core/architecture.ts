@@ -33,6 +33,7 @@ export type ExitReason =
   | "REGIME_DERISK"
   | "END_OF_DATA"
   | "INVALIDATED_DATA_GAP"
+  | "TAKE_PROFIT"
   | "NONE";
 
 // Feature Flags per evoluzione incrementale
@@ -194,37 +195,32 @@ export const MathUtils = {
 // Reads OHLCV, calculates volatility, momentum, statistical features.
 export class MarketDataLayer {
   static prepareFeatures(bars1H: Bar[], bars4H: Bar[], isH4Closed: boolean = false) {
+    if (bars1H.length < 200 || bars4H.length < 200) {
+      throw new Error(`Insufficient data for MarketDataLayer. Requires at least 200 bars. Got 1H=${bars1H.length}, 4H=${bars4H.length}`);
+    }
+
     const closes1H = bars1H.map((b) => b.c);
     const closes4H = bars4H.map((b) => b.c);
 
-    const atr1H =
-      MathUtils.getATR(bars1H.slice(-15), 14) ||
-      closes1H[closes1H.length - 1] * 0.02;
-    const atr4H =
-      MathUtils.getATR(bars4H.slice(-15), 14) ||
-      closes4H[closes4H.length - 1] * 0.02;
+    const atr1H = MathUtils.getATR(bars1H.slice(-15), 14) as number;
+    const atr4H = MathUtils.getATR(bars4H.slice(-15), 14) as number;
+    const atr1H_prev = MathUtils.getATR(bars1H.slice(-16, -1), 14) as number;
 
-    const atr1H_prev =
-      MathUtils.getATR(bars1H.slice(-16, -1), 14) ||
-      closes1H[closes1H.length - 2] * 0.02;
-
-    const rsi1H = MathUtils.getRSI(closes1H, 14) || 50;
-    const rsi1H_prev = MathUtils.getRSI(closes1H.slice(0, -1), 14) || 50;
-    const rsi2_1H = MathUtils.getRSI(closes1H, 2) || 50;
-    const sma50_1H =
-      MathUtils.getSMA(closes1H, 50) || closes1H[closes1H.length - 1];
-    const sma200_4H =
-      MathUtils.getSMA(closes4H, 200) || closes4H[closes4H.length - 1];
+    const rsi1H = MathUtils.getRSI(closes1H, 14) as number;
+    const rsi1H_prev = MathUtils.getRSI(closes1H.slice(0, -1), 14) as number;
+    const rsi2_1H = MathUtils.getRSI(closes1H, 2) as number;
+    const sma50_1H = MathUtils.getSMA(closes1H, 50) as number;
+    const sma200_4H = MathUtils.getSMA(closes4H, 200) as number;
     
-    const ema50_1H = MathUtils.getEMA(closes1H, 50) || closes1H[closes1H.length - 1];
-    const ema200_1H = MathUtils.getEMA(closes1H, 200) || closes1H[closes1H.length - 1];
+    const ema50_1H = MathUtils.getEMA(closes1H, 50) as number;
+    const ema200_1H = MathUtils.getEMA(closes1H, 200) as number;
     
-    const rsi2_4H = MathUtils.getRSI(closes4H, 2) || 50;
-    const ema50_4H = MathUtils.getEMA(closes4H, 50) || closes4H[closes4H.length - 1];
-    const ema200_4H = MathUtils.getEMA(closes4H, 200) || closes4H[closes4H.length - 1];
+    const rsi2_4H = MathUtils.getRSI(closes4H, 2) as number;
+    const ema50_4H = MathUtils.getEMA(closes4H, 50) as number;
+    const ema200_4H = MathUtils.getEMA(closes4H, 200) as number;
     
-    const adx_1H = MathUtils.getADX(bars1H, 14) || 0;
-    const bollinger_1H = MathUtils.getBollingerBands(closes1H, 20, 2.2);
+    const adx_1H = MathUtils.getADX(bars1H, 14) as number;
+    const bollinger_1H = MathUtils.getBollingerBands(closes1H, 20, 2.2)!;
 
     const prevHigh_1H = bars1H[bars1H.length - 2].h;
     const currentHigh_1H = bars1H[bars1H.length - 1].h;
@@ -331,11 +327,13 @@ export class RegimeLayer {
       if (distFromSMA > 0.25) return "EUPHORIA"; // Way above multi-month mean
       if (features.rsi1H < 40 && features.trend1H === -1) return "TRANSITION"; // Pullback in bull
       return "BULL";
-    } else {
+    } else if (features.trend4H === -1) {
       if (distFromSMA < -0.25) return "CRASH"; // Way below multi-month mean
       if (features.rsi1H > 60 && features.trend1H === 1) return "TRANSITION"; // Relief rally in bear
       return "BEAR";
     }
+    
+    return "TRANSITION";
   }
 }
 
@@ -519,13 +517,14 @@ export const NormalRsi2TrendTrailingConfig = {
   allowShort: false,
   rsiLength: 2,
   rsiLongThreshold: 10,
+  rsiShortThreshold: 90,
   fastMaLength: 50,
   slowMaLength: 200,
   maType: "EMA",
-  longTrailingStopPercent: 0.01,
+  trailingStopPercent: 0.02,
   cooldownBarsAfterExit: 1,
   allowedNormalSubRegimes: ["BULL"],
-  blockedNormalSubRegimes: ["BEAR"],
+  blockedNormalSubRegimes: ["BEAR", "CRASH", "EUPHORIA", "TRANSITION", "UNKNOWN", "HIGH_UNCERTAINTY"],
 };
 
 export const NormalRsi2TrendTrailingStats = {
@@ -598,9 +597,14 @@ export function generateNormalMarketSignals(context: SignalContext): SignalCandi
   // LONG SETUP
   if (NormalRsi2TrendTrailingConfig.allowLong && ema50 > ema200 && price > ema200 && rsi2 < NormalRsi2TrendTrailingConfig.rsiLongThreshold) {
       NormalRsi2TrendTrailingStats.candidatesLong++;
+      
+      // Dynamic quality calculation based on RSI depth and volatility
+      let dynQuality = rsi2 <= 2 ? 1.0 : rsi2 <= 5 ? 0.9 : 0.8;
+      if (features.volZScore < -1.0) dynQuality -= 0.3; // Reduce quality in low vol chop
+      
       return { 
         direction: "LONG", 
-        quality: 1.0, 
+        quality: dynQuality, 
         type: "RSI2_TREND_TRAILING", 
         engine: "NORMAL",
         meta: {
@@ -608,7 +612,30 @@ export function generateNormalMarketSignals(context: SignalContext): SignalCandi
             rsi2AtSignal: rsi2,
             ema50AtSignal: ema50,
             ema200AtSignal: ema200,
-            trailingStopPercent: NormalRsi2TrendTrailingConfig.longTrailingStopPercent
+            trailingStopPercent: NormalRsi2TrendTrailingConfig.trailingStopPercent
+        }
+      };
+  }
+
+  // SHORT SETUP
+  if (NormalRsi2TrendTrailingConfig.allowShort && ema50 < ema200 && price < ema200 && rsi2 > NormalRsi2TrendTrailingConfig.rsiShortThreshold) {
+      NormalRsi2TrendTrailingStats.shortConfirmedSetups++;
+      
+      // Dynamic quality calculation based on RSI height and volatility
+      let dynQuality = rsi2 >= 98 ? 1.0 : rsi2 >= 95 ? 0.9 : 0.8;
+      if (features.volZScore < -1.0) dynQuality -= 0.3; // Reduce quality in low vol chop
+      
+      return { 
+        direction: "SHORT", 
+        quality: dynQuality, 
+        type: "RSI2_TREND_TRAILING", 
+        engine: "NORMAL",
+        meta: {
+            signalTime: new Date(features.t || 0).toISOString(),
+            rsi2AtSignal: rsi2,
+            ema50AtSignal: ema50,
+            ema200AtSignal: ema200,
+            trailingStopPercent: NormalRsi2TrendTrailingConfig.trailingStopPercent
         }
       };
   }
@@ -633,11 +660,9 @@ export function generateNormalMarketSignals(context: SignalContext): SignalCandi
     const isLocalExtreme = regime === "CRASH" || regime === "EUPHORIA";
 
     if (isLocalExtreme || isGlobalExtreme) {
-      // If global is extreme but local is not, we pass the global regime to the engine 
-      // so it can check RSI-based mean reversion targets.
       const extremeContext = { 
-        ...context, 
-        regime: isLocalExtreme ? regime : (btcRegime as TradingRegime) 
+        ...context,
+        regime: (isLocalExtreme ? regime : (btcRegime || regime)) as TradingRegime
       };
       const extremeSignal = generateExtremeSignals(extremeContext);
       if (extremeSignal.direction !== "NEUTRAL") return extremeSignal;
@@ -756,10 +781,7 @@ export class GatekeeperLayer {
     // Chop Regime Overlay (FASE 4)
     let isChopBlocked = false;
     if (features.isChop) {
-      if (signal.engine === "NORMAL") {
-        // NormalPullbackConvexEngine thrives in SIDEWAYS and mid-vol
-        // We do not block it here, let it pass with its own internal gate
-      } else if (signal.type === "MEAN_REVERSION") {
+      if (signal.type === "MEAN_REVERSION") {
         if (signal.quality >= 0.8) {
           // Allow mean reversion but with heavily reduced size in chop
           return { allowed: true, reason: "CHOP_MEAN_REVERSION_ALLOWED", riskModifier: 0.5 };
@@ -773,8 +795,10 @@ export class GatekeeperLayer {
       }
     }
 
+    let finalRiskModifier = 1.0;
+
     // Expectancy Matrix Filter (FASE 3)
-    if (FEATURE_FLAGS.SETUP_EXPECTANCY_FILTER && symbol !== "UNKNOWN" && signal.engine !== "NORMAL") {
+    if (FEATURE_FLAGS.SETUP_EXPECTANCY_FILTER && symbol !== "UNKNOWN") {
       const normalizedSymbol = symbol.replace('USDT', 'USD');
       const permission = ExpectancyTracker.getSetupPermission(
         normalizedSymbol,
@@ -784,27 +808,10 @@ export class GatekeeperLayer {
       if (permission === "DISABLED") {
         return { allowed: false, reason: "EXPECTANCY_DISABLED" };
       }
-      if (permission === "INSUFFICIENT_DATA") {
-        // Default: allowSmallSize
-        return {
-          allowed: true,
-          reason: "EXPECTANCY_INSUFFICIENT_DATA",
-          riskModifier: 0.5,
-        };
-      }
-      if (permission === "REDUCED_SIZE") {
-        return {
-          allowed: true,
-          reason: "EXPECTANCY_REDUCED_SIZE",
-          riskModifier: 0.5,
-        };
-      }
-      if (permission === "ENABLED_HIGH_CONFIDENCE") {
-        return {
-          allowed: true,
-          reason: "EXPECTANCY_HIGH_CONFIDENCE",
-          riskModifier: 1.5,
-        };
+      if (permission === "INSUFFICIENT_DATA" || permission === "REDUCED_SIZE") {
+        finalRiskModifier = 0.5;
+      } else if (permission === "ENABLED_HIGH_CONFIDENCE") {
+        finalRiskModifier = 1.5;
       }
     }
 
@@ -836,7 +843,11 @@ export class GatekeeperLayer {
       };
     }
 
-    return { allowed: true, reason: "GATEKEEPER_APPROVED", riskModifier: 1.0, isChopBlocked };
+    let finalReason = "GATEKEEPER_APPROVED";
+    if (finalRiskModifier === 0.5) finalReason = "EXPECTANCY_INSUFFICIENT_DATA_OR_REDUCED";
+    else if (finalRiskModifier === 1.5) finalReason = "EXPECTANCY_HIGH_CONFIDENCE";
+
+    return { allowed: true, reason: finalReason, riskModifier: finalRiskModifier, isChopBlocked };
   }
 }
 
@@ -927,25 +938,40 @@ export class RiskLayer {
     let catastropheStopLoss = 0;
     let slDist = features.atr1H * 3.5; // Omega: widened to 3.5x ATR
     if (signal.engine === "NORMAL") {
-        const trailPct = NormalRsi2TrendTrailingConfig.longTrailingStopPercent;
+        const atrPct = (features.atr1H * 2.5) / features.price;
+        const trailPct = Math.max(NormalRsi2TrendTrailingConfig.trailingStopPercent, atrPct);
         slDist = features.price * trailPct;
+    }
+
+    // Dynamic leverage clamping based on risk
+    const expectedRiskPct = slDist / features.price;
+    if (expectedRiskPct * leverage > 0.15) {
+        // If logical SL represents > 15% physical loss at current leverage, derisk the leverage
+        leverage = Math.max(1.0, Math.floor(0.15 / expectedRiskPct * 10) / 10);
     }
 
     if (signal.direction === "LONG") {
       stopLoss = features.price - slDist;
-      catastropheStopLoss = features.price * 0.85; // -15% Native Fallback
+      catastropheStopLoss = features.price * (1 - (0.15 / leverage)); // Maximum 15% physical loss on margin
+      if (stopLoss < catastropheStopLoss) {
+        catastropheStopLoss = stopLoss * 0.98; // ensure catastrophe is always below logical SL
+      }
     } else {
       stopLoss = features.price + slDist;
-      catastropheStopLoss = features.price * 1.15; // +15% Native Fallback
+      catastropheStopLoss = features.price * (1 + (0.15 / leverage)); // Maximum 15% physical loss on margin
+      if (stopLoss > catastropheStopLoss) {
+        catastropheStopLoss = stopLoss * 1.02;
+      }
     }
 
     const allocatedCapital = capital * riskPerTrade * leverage;
     const maxExposureUsdCap = capital * 0.8; // Max 80% account per coin in any reality (raddoppiato da 0.4)
 
-    let targetAlloc = Math.min(allocatedCapital, maxExposureUsdCap);
+    // Account for strict Quality modifier early
+    let targetAlloc = allocatedCapital * signal.quality;
 
-    // Account for Quality
-    targetAlloc = targetAlloc * signal.quality; // Lower quality = lower size
+    // Apply absolute Cap
+    targetAlloc = Math.min(targetAlloc, maxExposureUsdCap);
 
     const tpDist = slDist * 3; // 3:1 RR default
     const takeProfit = signal.direction === "LONG" ? features.price + tpDist : features.price - tpDist;
@@ -971,6 +997,7 @@ export interface ActiveTrade {
   symbol: string;
   direction: SignalDirection;
   entryPrice: number;
+  entryTime?: number;
   size: number;
   leverage: number;
   stopLoss: number;
@@ -999,7 +1026,6 @@ export interface ActiveTrade {
   barsToOneR?: number;
   tierLabel?: string;
   status?: string;
-  entryTime?: number;
   riskTier?: string;
   brokerStopLossOrderId?: string;
   mfe?: number;
@@ -1013,7 +1039,9 @@ export class PositionExitLayer {
     currentRegime: TradingRegime,
     isNewClosedCandle: boolean = true
   ): { shouldExit: boolean; exitType: ExitReason } {
-    if (isNewClosedCandle) {
+    if (trade.entryTime) {
+      trade.barsHeld = Math.floor((Date.now() - trade.entryTime) / 3600000);
+    } else if (isNewClosedCandle) {
         trade.barsHeld++;
     }
 
@@ -1214,13 +1242,29 @@ export class PositionExitLayer {
       return { shouldExit: true, exitType: "TRAILING_STOP_LOSS" };
     }
 
+    // 1.5 Take Profit Hit Check
+    if (trade.takeProfit) {
+      if (trade.direction === "LONG" && features.price >= trade.takeProfit) {
+        return { shouldExit: true, exitType: "TAKE_PROFIT" };
+      }
+      if (trade.direction === "SHORT" && features.price <= trade.takeProfit) {
+        return { shouldExit: true, exitType: "TAKE_PROFIT" };
+      }
+    }
+
     // 2. Trailing Stop Management (Adaptive based on Entry Regime Volatility)
     if (trade.engine === "NORMAL") {
+        const trailPct = NormalRsi2TrendTrailingConfig.trailingStopPercent;
         if (trade.direction === "LONG") {
-            const trailPct = NormalRsi2TrendTrailingConfig.longTrailingStopPercent;
             const dynamicSL = trade.highWaterMark * (1 - trailPct);
             if (dynamicSL > trade.currentStopLoss || trade.currentStopLoss === 0) trade.currentStopLoss = dynamicSL;
             if (features.price <= trade.currentStopLoss && trade.currentStopLoss !== 0) {
+               return { shouldExit: true, exitType: "TRAILING_STOP" };
+            }
+        } else {
+            const dynamicSL = trade.lowWaterMark * (1 + trailPct);
+            if (dynamicSL < trade.currentStopLoss || trade.currentStopLoss === 0) trade.currentStopLoss = dynamicSL;
+            if (features.price >= trade.currentStopLoss && trade.currentStopLoss !== 0) {
                return { shouldExit: true, exitType: "TRAILING_STOP" };
             }
         }
@@ -1260,11 +1304,11 @@ export class PositionExitLayer {
       return { shouldExit: true, exitType: "EDGE_DECAY" };
 
     // 4. Regime Shift Derisking
-    // e.g. We entered BULL but now it's CRASH
-    if (trade.entryRegime === "BULL" && currentRegime === "CRASH") {
+    // E.g. entered anywhere except CRASH but now it's CRASH
+    if (trade.direction === "LONG" && currentRegime === "CRASH" && trade.entryRegime !== "CRASH") {
       return { shouldExit: true, exitType: "REGIME_DERISK" };
     }
-    if (trade.entryRegime === "BEAR" && currentRegime === "EUPHORIA") {
+    if (trade.direction === "SHORT" && currentRegime === "EUPHORIA" && trade.entryRegime !== "EUPHORIA") {
       return { shouldExit: true, exitType: "REGIME_DERISK" };
     }
 
@@ -1272,13 +1316,13 @@ export class PositionExitLayer {
     if (
       trade.direction === "LONG" &&
       features.rsi1H > 80 &&
-      trade.highWaterMark > trade.entryPrice * 1.05
+      trade.highWaterMark > trade.entryPrice + features.atr1H * 2
     )
       return { shouldExit: true, exitType: "SIGNAL_EXIT" };
     if (
       trade.direction === "SHORT" &&
       features.rsi1H < 20 &&
-      trade.lowWaterMark < trade.entryPrice * 0.95
+      trade.lowWaterMark < trade.entryPrice - features.atr1H * 2
     )
       return { shouldExit: true, exitType: "SIGNAL_EXIT" };
 

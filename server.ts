@@ -61,15 +61,6 @@ async function startServer() {
     errors: []
   };
 
-  setInterval(() => {
-    // Subtle mock drift and updates for the dashboard
-    systemState.driftMs = Math.floor(Math.random() * 20);
-    systemState.modelFreshnessMs = Math.floor(Math.random() * 1000);
-    if(Math.random() > 0.95) {
-      systemState.confidence = 0.8 + (Math.random() * 0.15 - 0.05);
-    }
-  }, 1000);
-
   // API Routes
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });

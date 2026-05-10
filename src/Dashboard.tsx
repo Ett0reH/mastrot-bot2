@@ -717,7 +717,7 @@ export default function Dashboard() {
                     </span>
                   </div>
                   <div className="p-0 overflow-x-auto max-h-[400px] overflow-y-auto custom-scrollbar">
-                    {(!liveState?.recentTrades || liveState?.recentTrades.length === 0) ? (
+                    {(!(liveState?.closedTrades || liveState?.recentTrades) || (liveState?.closedTrades || liveState?.recentTrades).length === 0) ? (
                       <div className="p-16 flex flex-col items-center justify-center text-white/20 font-sans text-sm">
                          No recent trades found
                       </div>
@@ -735,7 +735,7 @@ export default function Dashboard() {
                           </tr>
                         </thead>
                         <tbody>
-                          {liveState?.recentTrades.map((t: any, i: number) => {
+                          {(liveState?.closedTrades || liveState?.recentTrades).map((t: any, i: number) => {
                             const isLong = t.side === 'LONG';
                             const isWin = t.pnl > 0;
                             return (

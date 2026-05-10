@@ -25,6 +25,6 @@ Le logiche di uscita sono complesse e stratificate per preservare l'equità:
 - **TypeScript & Build:** Tutto gira internamente su TSX/TSC rigoroso. (`verbatimModuleSyntax` etc.).
 
 ## 5. Ultime Modifiche (Aggiornamento Recente)
-- *Fix TypeScript Environment:* Corrette le configurazioni di build mancanti e ripristinato il pacchetto dipendenze di base per l'ambiente Node/TypeScript in cui testiamo i fills via `@siebly/kraken-api`.
+- Creata la struttura di test in `summa-test.md` che divide l'architettura in 5 Macro-Aree fondamentali (Core Strategy, Risk Management, Trade Lifecycle, Live Engine, Persistence/UI). Tutte le future sessioni di test e analisi profonda dovranno far riferimento a queste macro-aree per isolare i comportamenti (es. Ghost Trades, coerenza UI, disallineamento Kraken).
+- *Fix TypeScript Environment:* Corrette le configurazioni di build mancanti e ripristinato il pacchetto dipendenze di base per l'ambiente Node/TypeScript in cui testiamo i fills.
 - *Integrazione Leva di FASE 10 confermata nel core e gestita correttamente.*
-- *Bugfix sulle dipendenze e build error dovuti a file di configurazione (`package.json`) mancanti.*

@@ -46,6 +46,7 @@ export interface LiveState {
   baseBalance?: number;
   openPositions: ActiveTrade[];
   recentTrades: any[];
+  closedTrades?: any[];
   regime: string;
   regimes?: Record<string, string>;
   lastUpdate: string;
@@ -381,7 +382,7 @@ let loadStatePromise: Promise<void> | null = null;
 let loadAttempts = 0;
 
 // Utility to wrap a promise with a timeout to prevent infinite hanging and memory leaks
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operationName: string = 'Operation'): Promise<T> {
+export function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operationName: string = 'Operation'): Promise<T> {
   let timeoutId: NodeJS.Timeout;
   const timeoutPromise = new Promise<T>((_, reject) => {
     timeoutId = setTimeout(() => {
@@ -952,20 +953,34 @@ class KrakenExchangeAdapter {
 export async function initExchange() {
   if (exchange) return;
 
-  // Load default neutral expectancy matrix to avoid local dependency
+  // Load real expectancy matrix from backtest
   if (!expectancyMatrixLoaded) {
-    console.log("[INIT] Loading DEFAULT_NEUTRAL_MATRIX (Proxy) to remove offline artifact dependency...");
-    const DEFAULT_NEUTRAL_MATRIX = new Proxy({}, {
-        get: function(target, prop) {
-            return {
-                expectancy: 0.1,
-                profitFactor: 1.25,
-                sampleSize: 100,
-                trades: 100
-            };
+    try {
+        if (fs.existsSync(path.join(process.cwd(), 'backtest_report_latest.json'))) {
+            const report = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'backtest_report_latest.json'), 'utf8'));
+            if (report.expectancyMatrix) {
+                console.log("[INIT] Successfully loaded real expectancy matrix from backtest report.");
+                ExpectancyTracker.loadMatrix(report.expectancyMatrix);
+            } else {
+                throw new Error("Missing expectancyMatrix in report");
+            }
+        } else {
+            throw new Error("backtest_report_latest.json not found");
         }
-    });
-    ExpectancyTracker.loadMatrix(DEFAULT_NEUTRAL_MATRIX);
+    } catch (e: any) {
+        console.error(`[INIT] Warning: Could not load real expectancy matrix (${e.message}). Falling back to DEFAULT_NEUTRAL_MATRIX (Proxy)...`);
+        const DEFAULT_NEUTRAL_MATRIX = new Proxy({}, {
+            get: function(target, prop) {
+                return {
+                    expectancy: 0.1,
+                    profitFactor: 1.25,
+                    sampleSize: 100,
+                    trades: 100
+                };
+            }
+        });
+        ExpectancyTracker.loadMatrix(DEFAULT_NEUTRAL_MATRIX);
+    }
     expectancyMatrixLoaded = true;
   }
 
@@ -991,7 +1006,7 @@ function delaySleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function ccxtWithRetry<T>(fn: () => Promise<T>, retries = 6, delay = 2000): Promise<T> {
+export async function ccxtWithRetry<T>(fn: () => Promise<T>, retries = 6, delay = 2000): Promise<T> {
   for (let i = 0; i < retries; i++) {
     try {
       return await withTimeout(fn(), 30000, 'CCXT API Call');
@@ -1046,6 +1061,55 @@ export async function getLiveState(): Promise<LiveState> {
 let isTicking = false;
 let tickConsecutiveFailures = 0;
 let daemonInterval: NodeJS.Timeout | null = null;
+let ohlcvDaemonInterval: NodeJS.Timeout | null = null;
+const exitCooldowns: Record<string, number> = {};
+
+async function runOhlcvSyncDaemon() {
+    if (!exchange || !state.isActive) return;
+    
+    // Background cache updater
+    const nowMs = Date.now();
+    const symbols = Array.from(new Set(['BTC/USD:USD', ...TARGET_SYMBOLS]));
+    
+    for (const symbol of symbols) {
+         if (!state.isActive) break;
+         
+         if (!liveDataCache[symbol]) {
+             // Precompute will be handled by init or background
+             continue;
+         }
+         
+         try {
+             let needs1H = false;
+             let needs4H = false;
+             
+             const last1H = liveDataCache[symbol].bars1H[liveDataCache[symbol].bars1H.length - 1];
+             if (!last1H || nowMs >= new Date(last1H.t).getTime() + 3600 * 1000) needs1H = true;
+
+             const last4H = liveDataCache[symbol].bars4H[liveDataCache[symbol].bars4H.length - 1];
+             if (!last4H || nowMs >= new Date(last4H.t).getTime() + 4 * 3600 * 1000) needs4H = true;
+
+             if (needs1H || needs4H) console.log(`[OHLCV DAEMON] Syncing ${symbol} in background...`);
+             
+             if (needs1H) {
+                 const sOHLCV1H = await ccxtWithRetry(() => exchange!.fetchOHLCV(symbol, '1h', undefined, 5));
+                 if (sOHLCV1H && (sOHLCV1H as any[]).length > 0) {
+                     liveDataCache[symbol].bars1H = mergeOHLCV(liveDataCache[symbol].bars1H, processOHLCV(sOHLCV1H as any[])).slice(-400);
+                 }
+                 await delaySleep(300);
+             }
+             if (needs4H) {
+                 const sOHLCV4H = await ccxtWithRetry(() => exchange!.fetchOHLCV(symbol, '4h', undefined, 5));
+                 if (sOHLCV4H && (sOHLCV4H as any[]).length > 0) {
+                     liveDataCache[symbol].bars4H = mergeOHLCV(liveDataCache[symbol].bars4H, processOHLCV(sOHLCV4H as any[])).slice(-400);
+                 }
+                 await delaySleep(300);
+             }
+         } catch(e: any) {
+             console.error(`[OHLCV DAEMON] Failed background sync for ${symbol}: ${e.message}`);
+         }
+    }
+}
 
 // Start the continuous background loop
 export function startTickerDaemon() {
@@ -1062,6 +1126,11 @@ export function startTickerDaemon() {
         await initExchange();
         await loopTick();
     }, 7500); // Check every 7.5s 
+    
+    if (!ohlcvDaemonInterval) {
+        // Run sync loop every minute roughly
+        ohlcvDaemonInterval = setInterval(() => runOhlcvSyncDaemon(), 60000); 
+    }
 }
 
 // We export an explicit cron trigger so third party pingers (cron-job.org) can force ticks
@@ -1206,7 +1275,7 @@ export async function emergencyCloseAll() {
                 console.error(`[EMERGENCY_KILL_SWITCH] Cleared all open orders.`);
            } else {
                 // Try fetch and cancel fallback
-                const openOrders = await exchange.client.getOpenOrders ? await ccxtWithRetry(() => exchange.client.getOpenOrders(), 2, 500) : { openOrders: [] };
+                const openOrders: any = await exchange.client.getOpenOrders ? await ccxtWithRetry(() => exchange.client.getOpenOrders(), 2, 500) : { openOrders: [] };
                 if (openOrders.openOrders) {
                     for (const o of openOrders.openOrders) {
                         try {
@@ -1244,9 +1313,7 @@ export async function emergencyCloseAll() {
          try {
              const exPos = livePos.find((x: any) => x.symbol === p.symbol);
              if (!exPos || Math.abs(exPos.contracts) === 0) {
-                 console.error(`[EMERGENCY_KILL_SWITCH] Dropping local-only orphan ${p.symbol}...`);
-                 const side = p.direction === 'LONG' ? 'sell' : 'buy';
-                 await ccxtWithRetry(() => exchange.createMarketOrder(p.symbol, side, p.size, undefined, { reduceOnly: true }));
+                 console.error(`[EMERGENCY_KILL_SWITCH] Dropping local-only orphan ${p.symbol} (no exchange call needed).`);
              }
          } catch (e: any) {}
       }
@@ -1321,7 +1388,7 @@ let lastTickTime = 0;
 const MIN_TICK_INTERVAL_MS = 7500;
 
 // Simple utility for deep comparison of state parts
-function hashStateSnapshot() {
+export function hashStateSnapshot() {
   return JSON.stringify({
     st: state.status,
     pos: state.openPositions?.length,
@@ -1369,7 +1436,7 @@ function filterClosedCandles(candles: Bar[], timeframe: string, nowMs: number): 
     return candles;
 }
 
-function resolveOrderAmount(exchange: any, symbol: string, rawAmount: number, price: number) {
+export function resolveOrderAmount(exchange: any, symbol: string, rawAmount: number, price: number) {
     let ok = true;
     let reason = "OK";
     let minAmount = 0;
@@ -1382,24 +1449,25 @@ function resolveOrderAmount(exchange: any, symbol: string, rawAmount: number, pr
     }
 
     if (rawAmount <= 0) {
-        ok = false;
-        reason = "Amount must be positive";
+        return { ok: false, amount: 0, reason: "Amount must be positive", rawAmount, precisionAmount: 0, minAmount, minCost };
     }
 
     let precisionAmountStr = exchange.amountToPrecision ? exchange.amountToPrecision(symbol, rawAmount) : rawAmount.toString();
     let precisionAmount = Number(precisionAmountStr);
     
     if (precisionAmount <= 0) {
-        ok = false; reason = "Amount truncated to zero by precision";
+        return { ok: false, amount: 0, reason: "Amount truncated to zero by precision", rawAmount, precisionAmount, minAmount, minCost };
     }
 
     if (minAmount > 0 && precisionAmount < minAmount) {
         ok = false; reason = `Amount ${precisionAmount} below min limits ${minAmount}`;
+        return { ok, amount: precisionAmount, reason, rawAmount, precisionAmount, minAmount, minCost };
     }
     
     const notional = precisionAmount * price;
     if (minCost > 0 && notional < minCost) {
         ok = false; reason = `Notional ${notional} below min cost ${minCost}`;
+        return { ok, amount: precisionAmount, reason, rawAmount, precisionAmount, minAmount, minCost };
     }
 
     return {
@@ -1471,31 +1539,18 @@ export async function loopTick() {
         
         if (!liveDataCache['BTC/USD:USD']) return; // abort tick if still failing
 
-        let needsBTC1H = false;
-        let needsBTC4H = false;
-        
-        const lastBTC1H = liveDataCache['BTC/USD:USD'].bars1H[liveDataCache['BTC/USD:USD'].bars1H.length - 1];
-        if (!lastBTC1H || nowMs >= new Date(lastBTC1H.t).getTime() + 3600 * 1000) needsBTC1H = true;
-
-        const lastBTC4H = liveDataCache['BTC/USD:USD'].bars4H[liveDataCache['BTC/USD:USD'].bars4H.length - 1];
-        if (!lastBTC4H || nowMs >= new Date(lastBTC4H.t).getTime() + 4 * 3600 * 1000) needsBTC4H = true;
-
-        if (needsBTC1H) {
-            let ohlcv1H = await ccxtWithRetry(() => exchange!.fetchOHLCV('BTC/USD:USD', '1h', undefined, 5));
-            liveDataCache['BTC/USD:USD'].bars1H = mergeOHLCV(liveDataCache['BTC/USD:USD'].bars1H, processOHLCV(ohlcv1H as any[])).slice(-400);
-            await delaySleep(200);
-        }
-        if (needsBTC4H) {
-            let ohlcv4H = await ccxtWithRetry(() => exchange!.fetchOHLCV('BTC/USD:USD', '4h', undefined, 5));
-            liveDataCache['BTC/USD:USD'].bars4H = mergeOHLCV(liveDataCache['BTC/USD:USD'].bars4H, processOHLCV(ohlcv4H as any[])).slice(-400);
-            await delaySleep(200);
-        }
-        
         btc1H = liveDataCache['BTC/USD:USD'].bars1H;
         btc4H = liveDataCache['BTC/USD:USD'].bars4H;
         
         const validBTC1H = filterClosedCandles(btc1H, '1h', nowMs);
         const validBTC4H = filterClosedCandles(btc4H, '4h', nowMs);
+        
+        let isGlobalH4Closed = false;
+        if (validBTC1H.length > 0 && validBTC4H.length > 0) {
+            const last1HTimeMs = new Date(validBTC1H[validBTC1H.length - 1].t).getTime();
+            const last4HTimeMs = new Date(validBTC4H[validBTC4H.length - 1].t).getTime();
+            isGlobalH4Closed = last1HTimeMs === last4HTimeMs + 3 * 3600 * 1000;
+        }
 
         // P6: Drift Detection on OHLCV
         const btc1HFresh = await validateMarketDataFreshness(validBTC1H, '1h');
@@ -1505,9 +1560,9 @@ export async function loopTick() {
             return;
         }
 
-        if (validBTC1H.length > 50 && validBTC4H.length > 100) {
+        if (validBTC1H.length >= 200 && validBTC4H.length >= 200) {
             console.log("Preparing features for BTC...");
-            globalFeatures = MarketDataLayer.prepareFeatures(validBTC1H, validBTC4H, true);
+            globalFeatures = MarketDataLayer.prepareFeatures(validBTC1H, validBTC4H, isGlobalH4Closed);
             state.regime = RegimeLayer.detect(globalFeatures);
             btcLivePrice = validBTC1H[validBTC1H.length - 1].c;
             console.log(`[Engine] Global Anchor (BTC) Regime: ${state.regime}`);
@@ -1550,6 +1605,8 @@ export async function loopTick() {
         }
 
         const oldStopLoss = p.currentStopLoss;
+        const oldSize = p.size;
+        const wasHarvested = (p as any).isHarvestExecuted;
         
         let exitDecision: any = { shouldExit: false, exitType: "" };
         if ((p as any).nativeSlHit) {
@@ -1558,6 +1615,26 @@ export async function loopTick() {
             livePrice = p.currentStopLoss;
         } else {
             exitDecision = PositionExitLayer.monitorAndExit(p, mockFeatures, state.regime as TradingRegime, isNewClosedCandle);
+        }
+
+        // Execute Partial Take Profit (Harvest) detected by size drop
+        if (p.size < oldSize && !wasHarvested && (p as any).isHarvestExecuted) {
+             const diff = oldSize - p.size;
+             if (process.env.LIVE_TRADING_ENABLED === 'true') {
+                 try {
+                     const side = p.direction === 'LONG' ? 'sell' : 'buy';
+                     console.log(`[HARVEST] Executing partial close for ${p.symbol} dropping ${diff} contracts...`);
+                     await ccxtWithRetry(() => exchange.createMarketOrder(p.symbol, side, diff, undefined, { reduceOnly: true }));
+                     console.log(`[HARVEST] Successfully harvested ${p.symbol}.`);
+                 } catch (e: any) {
+                     console.error(`[HARVEST_FAIL] Failed to partial close ${p.symbol}: ${e.message}`);
+                     // Revert local state so it can retry next tick
+                     p.size = oldSize;
+                     (p as any).isHarvestExecuted = false;
+                 }
+             } else {
+                 console.log(`[HARVEST] Mock partial close for ${p.symbol} dropping ${diff} contracts (PAPER TRADING).`);
+             }
         }
 
         // If the Stop Loss has trailed, update native SL on Kraken!
@@ -1594,9 +1671,22 @@ export async function loopTick() {
                      
                      // If exchange rejects reduceOnly (because position was manually closed or liquidated), force drop it locally
                      const msg = e.message.toLowerCase();
-                     if (msg.includes('position') || msg.includes('reduce') || msg.includes('balance') || msg.includes('invalid') || msg.includes('margin')) {
+                     if (msg.includes('position') || msg.includes('reduce') || msg.includes('balance') || msg.includes('invalid') || msg.includes('margin') || msg.includes('order')) {
                          console.warn(`[LIVE EXECUTION] Exchange rejected exit. Assuming position already closed/liquidated. Forcing local sync.`);
                          isLiveExitSuccess = true;
+                     }
+                     
+                     // Secondary ghost-trade fallback: if it failed, verify if it even exists anymore
+                     if (!isLiveExitSuccess) {
+                         try {
+                              console.log(`[LIVE EXECUTION] Checking if ${p.symbol} exists on broker to prevent ghost lock...`);
+                              const livePos: any = await ccxtWithRetry(() => exchange.fetchPositions());
+                              const exPos = (livePos as any[])?.find((x: any) => x.symbol === p.symbol);
+                              if (!exPos || Math.abs(exPos.contracts || 0) === 0) {
+                                  console.warn(`[LIVE EXECUTION] Position ${p.symbol} confirmed NOT open on broker. Dropping local ghost.`);
+                                  isLiveExitSuccess = true;
+                              }
+                         } catch(err3) {}
                      }
                  }
                  
@@ -1615,6 +1705,8 @@ export async function loopTick() {
                 continue;
             }
 
+            exitCooldowns[p.symbol] = Date.now() + 3600000; // 1 hour cooldown after exit
+
             const exitSizeValue = p.size * livePrice;
             const exitFee = exitSizeValue * FEE_RATE;
             const entryValue = p.size * p.entryPrice;
@@ -1626,6 +1718,18 @@ export async function loopTick() {
                 floatingPnl = (entryValue - entryFee) - (exitSizeValue + exitFee);
             }
             if (isNaN(floatingPnl) || !isFinite(floatingPnl)) floatingPnl = 0;
+            
+            if (!state.closedTrades) state.closedTrades = [];
+            state.closedTrades.unshift({
+                time: new Date().toISOString(),
+                symbol: p.symbol,
+                side: p.direction,
+                entry: p.entryPrice,
+                exit: livePrice,
+                pnl: floatingPnl,
+                reason: exitDecision.exitType || 'UNKNOWN'
+            });
+            if (state.closedTrades.length > 50) state.closedTrades.pop();
             
             let newBaseBalance = (state.baseBalance || 10000.00) + floatingPnl;
             if (isNaN(newBaseBalance) || !isFinite(newBaseBalance)) newBaseBalance = state.baseBalance || 10000.00;
@@ -1669,6 +1773,16 @@ export async function loopTick() {
                 // If we are significantly out of sync with Kraken's wallet balance
                 if (Math.abs((state.baseBalance || 10000.00) - realBaseBalance) > 0.05) {
                     console.log(`[STATE SYNC] Kraken portfolio is $${realMargin.toFixed(2)}. Updating virtual base balance to $${realBaseBalance.toFixed(2)}`);
+                    
+                    // If realBaseBalance dropped significantly (e.g., user withdrawal), scale down the high-water mark
+                    if (state.maxHistoricalEquity && realBaseBalance < (state.baseBalance || 10000.00)) {
+                        const dropRatio = realBaseBalance / (state.baseBalance || 10000.00);
+                        if (dropRatio < 0.99) {
+                            console.log(`[CAPITAL] Detected withdrawal of ${(1 - dropRatio)*100}%. Scaling down maxHistoricalEquity.`);
+                           state.maxHistoricalEquity = state.maxHistoricalEquity * dropRatio;
+                        }
+                    }
+
                     state.baseBalance = realBaseBalance;
                     newBalance = realMargin;
                     
@@ -1691,13 +1805,33 @@ export async function loopTick() {
                         state.recentTrades = liveTrades;
                     }
                     
-                    const livePos = await exchange.fetchPositions();
-                    const openOrders = await exchange.client.getOpenOrders ? await ccxtWithRetry(() => exchange.client.getOpenOrders(), 2, 500) : { openOrders: [] };
+                    const livePos: any = await exchange.fetchPositions();
+                    const openOrders: any = await exchange.client.getOpenOrders ? await ccxtWithRetry(() => exchange.client.getOpenOrders(), 2, 500) : { openOrders: [] };
                     
                     if (openOrders.openOrders && openOrders.openOrders.length > 0) {
                         const unmanagedOrders = openOrders.openOrders.filter((o: any) => {
                             // Ignore our native stop loss orders
-                            return !simulatedPositions.some(p => (p as any).brokerStopLossOrderId === o.order_id);
+                            const localP = simulatedPositions.find(p => (p as any).brokerStopLossOrderId === o.order_id);
+                            if (localP) return false;
+                            
+                            // Check if it belongs to a local position that misses its broker order id
+                            const matchP = simulatedPositions.find(p => (exchange as any).symbolToNative(p.symbol) === o.symbol);
+                            if (matchP) {
+                                if (!(matchP as any).brokerStopLossOrderId) {
+                                    (matchP as any).brokerStopLossOrderId = o.order_id;
+                                    console.log(`[AUTO-ADOPT] Re-linking unmanaged native order ${o.order_id} to local ${matchP.symbol}`);
+                                    return false;
+                                }
+                            }
+                            
+                            // Check if it belongs to a live position we are about to adopt
+                            const hasLivePos = livePos.some((lp: any) => (exchange as any).symbolToNative(lp.symbol) === o.symbol && Math.abs(lp.contracts) > 0);
+                            if (hasLivePos) {
+                                console.log(`[AUTO-ADOPT] Retaining unmanaged order ${o.order_id} for live broker adoption of ${o.symbol}.`);
+                                return false; // don't clear it, wait for adoption
+                            }
+                            
+                            return true;
                         });
                         
                         if (unmanagedOrders.length > 0) {
@@ -1741,7 +1875,7 @@ export async function loopTick() {
                                     console.warn(`[NATIVE_SL_HEAL] Missing Stop Loss for active position ${localP.symbol}. Generating emergency SL!`);
                                     try {
                                         const side = localP.direction === 'LONG' ? 'sell' : 'buy';
-                                        const slRes = await ccxtWithRetry(() => exchange.updateStopLossOrder(localP.symbol, side, localP.size, localP.currentStopLoss));
+                                        const slRes: any = await ccxtWithRetry(() => exchange.updateStopLossOrder(localP.symbol, side, localP.size, localP.currentStopLoss));
                                         if (slRes && slRes.id) {
                                             (localP as any).brokerStopLossOrderId = slRes.id;
                                             console.log(`[NATIVE_SL_HEAL] Successfully recreated Stop Loss for ${localP.symbol}: ${slRes.id}`);
@@ -1760,6 +1894,9 @@ export async function loopTick() {
                                 console.error(`[BROKER_STATE_MISMATCH] Broker has ${exPos.symbol} absent locally. ADOPTING FOR TEST.`);
                                 const direction = exPos.contracts > 0 ? 'LONG' : 'SHORT';
                                 const entryPrice = parseFloat(exPos.entryPrice) || (liveDataCache[exPos.symbol] ? liveDataCache[exPos.symbol].bars1H[liveDataCache[exPos.symbol].bars1H.length - 1].c : 0);
+                                const nativeOrder = openOrders.openOrders?.find((o: any) => o.symbol === (exchange as any).symbolToNative(exPos.symbol));
+                                const stopPrice = nativeOrder?.stopPrice ? parseFloat(nativeOrder.stopPrice) : (direction === 'LONG' ? entryPrice * 0.95 : entryPrice * 1.05);
+                                
                                 simulatedPositions.push({
                                     id: `test-adopt-${Date.now()}`,
                                     symbol: exPos.symbol,
@@ -1770,8 +1907,9 @@ export async function loopTick() {
                                     unrealizedPnl: parseFloat(exPos.unrealizedPnl) || 0,
                                     mfe: 0,
                                     mae: 0,
-                                    stopLoss: direction === 'LONG' ? entryPrice * 0.95 : entryPrice * 1.05,
-                                    currentStopLoss: direction === 'LONG' ? entryPrice * 0.95 : entryPrice * 1.05
+                                    stopLoss: stopPrice,
+                                    currentStopLoss: stopPrice,
+                                    brokerStopLossOrderId: nativeOrder?.order_id
                                 } as any);
                             }
                         }
@@ -1822,6 +1960,9 @@ export async function loopTick() {
           // One position max per symbol
           if (simulatedPositions.find(p => p.symbol === symbol)) continue;
 
+          // Prevent immediate reentry (Tick collision fix)
+          if (exitCooldowns[symbol] && Date.now() < exitCooldowns[symbol]) continue;
+
           let sym1H: Bar[] = [];
           let sym4H: Bar[] = [];
           
@@ -1829,30 +1970,9 @@ export async function loopTick() {
               sym1H = btc1H; sym4H = btc4H;
           } else {
               try {
-                if (!liveDataCache[symbol]) await precomputeLiveOHLCV();
-                
+                // Ensure array exists, but skip if daemon hasn't precomputed the symbols
                 if (!liveDataCache[symbol]) continue;
 
-                let needs1H = false;
-                let needs4H = false;
-                
-                const last1H = liveDataCache[symbol].bars1H[liveDataCache[symbol].bars1H.length - 1];
-                if (!last1H || nowMs >= new Date(last1H.t).getTime() + 3600 * 1000) needs1H = true;
-
-                const last4H = liveDataCache[symbol].bars4H[liveDataCache[symbol].bars4H.length - 1];
-                if (!last4H || nowMs >= new Date(last4H.t).getTime() + 4 * 3600 * 1000) needs4H = true;
-
-                if (needs1H) {
-                    const sOHLCV1H = await ccxtWithRetry(() => exchange!.fetchOHLCV(symbol, '1h', undefined, 5));
-                    liveDataCache[symbol].bars1H = mergeOHLCV(liveDataCache[symbol].bars1H, processOHLCV(sOHLCV1H as any[])).slice(-400);
-                    await delaySleep(200);
-                }
-                if (needs4H) {
-                    const sOHLCV4H = await ccxtWithRetry(() => exchange!.fetchOHLCV(symbol, '4h', undefined, 5));
-                    liveDataCache[symbol].bars4H = mergeOHLCV(liveDataCache[symbol].bars4H, processOHLCV(sOHLCV4H as any[])).slice(-400);
-                    await delaySleep(200);
-                }
-                
                 sym1H = liveDataCache[symbol].bars1H;
                 sym4H = liveDataCache[symbol].bars4H;
               } catch(e: any) {
@@ -1864,21 +1984,22 @@ export async function loopTick() {
           const validSym1H = filterClosedCandles(sym1H, '1h', nowMs);
           const validSym4H = filterClosedCandles(sym4H, '4h', nowMs);
 
-        if (validSym1H.length > 50 && validSym4H.length > 100) {
+        if (validSym1H.length >= 200 && validSym4H.length >= 200) {
               // P6: Drift Detection for specific symbol
               const symFresh = await validateMarketDataFreshness(validSym1H, '1h');
               if (!symFresh) {
                   console.log(`[DRIFT_DETECT] ${symbol} data is stale. Skipping.`);
                   continue;
               }
-
-              const features = MarketDataLayer.prepareFeatures(validSym1H, validSym4H, true);
               
-              // PRICE TARGETING ENTRY DELAY FIX: Use real-time live ticker price
-              // instead of historical closed 1H candle price for SL and Size calculations
-              if (tickers[symbol] && tickers[symbol].last) {
-                  features.price = tickers[symbol].last;
+              let isH4Closed = false;
+              if (validSym1H.length > 0 && validSym4H.length > 0) {
+                  const last1HTimeMs = new Date(validSym1H[validSym1H.length - 1].t).getTime();
+                  const last4HTimeMs = new Date(validSym4H[validSym4H.length - 1].t).getTime();
+                  isH4Closed = last1HTimeMs === last4HTimeMs + 3 * 3600 * 1000;
               }
+
+              const features = MarketDataLayer.prepareFeatures(validSym1H, validSym4H, isH4Closed);
 
               const localRegime = RegimeLayer.detect(features);
               state.regimes[symbol] = localRegime;
@@ -1909,6 +2030,13 @@ export async function loopTick() {
 
                   const gate = GatekeeperLayer.allowEntry(signal, features, localRegime as TradingRegime, symbol);
                   if (gate.allowed) {
+                      // Apply live ticker overriding ONLY after signals and gating have evaluated using consistent snapshots
+                      // This avoids temporal mismatch on features.price while allowing execution size matching
+                      const oldFeaturePrice = features.price;
+                      if (tickers[symbol] && tickers[symbol].last) {
+                          features.price = tickers[symbol].last;
+                      }
+
                       const risk = RiskLayer.calculateRisk(
                           signal, 
                           features, 
@@ -1919,7 +2047,7 @@ export async function loopTick() {
                           { btcTrend1H: globalFeatures?.trend1H, btcRegime: state.regime as TradingRegime }
                       );
                       
-                      const MAX_GLOBAL_EXPOSURE = 50000;
+                      const MAX_GLOBAL_EXPOSURE = Math.max(50000, state.balance * 2.5);
                       const currentExposure = simulatedPositions.reduce((acc, p) => acc + (p.size * p.entryPrice), 0);
                       
                       let rawSize = risk.positionSize * capitalHealth.allowedCapacityMultiplier;
@@ -2073,7 +2201,7 @@ export async function loopTick() {
                   }
               }
           } else {
-              console.log(`[DATA_WAIT] ${symbol} not enough 1H (${validSym1H.length}/50) or 4H (${validSym4H.length}/100) closed bars.`);
+              console.log(`[DATA_WAIT] ${symbol} not enough 1H (${validSym1H.length}/200) or 4H (${validSym4H.length}/200) closed bars.`);
           }
     }
     }
