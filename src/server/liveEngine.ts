@@ -906,26 +906,47 @@ class KrakenExchangeAdapter {
                 state.krakenStatus.balanceSync = true;
                 state.krakenStatus.lastError = undefined;
 
-                // If the user uses Multi-Collateral (Flex) margin account
+                let totalFlexValue = 0;
+                let totalMarginValue = 0;
+                let totalCashValue = 0;
+                state.marginUsed = 0;
+
+                // 1) Flex Account
                 if (res.accounts['flex'] && (res.accounts['flex'] as any).type === 'multiCollateralMarginAccount') {
-                    state.marginUsed = (res.accounts['flex'] as any).initialMargin || 0; // Fixed fallback
-                    // Use portfolioValue (which includes unrealized PNL) or balanceValue
-                    return (res.accounts['flex'] as any).portfolioValue;
+                    state.marginUsed += (res.accounts['flex'] as any).initialMargin || 0;
+                    totalFlexValue = (res.accounts['flex'] as any).portfolioValue || 0;
                 }
                 
+                // 2) Single-Collateral Margin Accounts
                 const marginAccs = Object.values(res.accounts).filter((a: any) => a.type === 'marginAccount') as any[];
-                if (marginAccs.length > 0) {
-                    let totalVal = 0;
-                    let totalUsed = 0;
-                    for (const acc of marginAccs) {
-                        const cur = acc.currency || 'usd';
-                        let val = 0;
-                        if (acc.balances && acc.balances[cur]) val += parseFloat(acc.balances[cur]);
-                        if (acc.auxiliary && acc.auxiliary.pnl) val += parseFloat(acc.auxiliary.pnl);
-                        totalVal += val;
-                        totalUsed += (acc.auxiliary?.margin || 0);
+                for (const acc of marginAccs) {
+                    const cur = acc.currency || 'usd';
+                    let val = 0;
+                    if (acc.balances && acc.balances[cur]) val += parseFloat(acc.balances[cur]);
+                    if (acc.auxiliary && acc.auxiliary.pnl) val += parseFloat(acc.auxiliary.pnl);
+                    totalMarginValue += val;
+                    state.marginUsed += (acc.auxiliary?.margin || 0);
+                }
+
+                // 3) Cash Account
+                const cashAcc = res.accounts['cash'];
+                if (cashAcc && cashAcc.balances) {
+                    for (const [currency, amount] of Object.entries((cashAcc as any).balances)) {
+                        const v = parseFloat(amount as string) || 0;
+                        if (v > 0) {
+                           if (['usd', 'usdt', 'usdc'].includes(currency.toLowerCase())) {
+                               totalCashValue += v;
+                           } else if (currency.toLowerCase() === 'eur') {
+                               totalCashValue += v * 1.08; // Rough EUR/USD fallback
+                           }
+                        }
                     }
-                    state.marginUsed = totalUsed;
+                }
+
+                const totalVal = totalFlexValue + totalMarginValue + totalCashValue;
+                console.log(`[Adapter] Balances -> Flex: ${totalFlexValue}, Margin: ${totalMarginValue}, Cash: ${totalCashValue}. Total: ${totalVal}`);
+
+                if (totalVal > 0 || marginAccs.length > 0 || res.accounts['flex'] || res.accounts['cash']) {
                     return totalVal;
                 }
             }
