@@ -524,7 +524,7 @@ class KrakenExchangeAdapter {
            apiKey: config.apiKey,
            apiSecret: config.secret,
            strictParamValidation: true,
-           testnet: process.env.KRAKEN_SANDBOX === 'true' || process.env.KRAKEN_SANDBOX === undefined
+           testnet: process.env.KRAKEN_SANDBOX === 'true'
        });
        TARGET_SYMBOLS.forEach(s => this.markets[s] = true);
     }
@@ -954,7 +954,7 @@ export async function initExchange() {
     apiKey: process.env.KRAKEN_API_KEY,
     secret: process.env.KRAKEN_SECRET_KEY
   });
-  if (process.env.KRAKEN_SANDBOX === 'true' || process.env.KRAKEN_SANDBOX === undefined) {
+  if (process.env.KRAKEN_SANDBOX === 'true') {
     console.log("TEST ENVIRONMENT: Enabling Kraken Sandbox mode");
     exchange.setSandboxMode(true);
   } else {
