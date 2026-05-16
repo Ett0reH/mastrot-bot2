@@ -903,7 +903,7 @@ export default function Dashboard() {
                         { label: 'Recovery Factor', key: 'recoveryFactor', fmt: (v: number) => v.toFixed(2), polarity: true, defaultColor: 'text-[#10B981]' },
                         { label: 'Time Under Water', key: 'timeUnderWater', fmt: (v: number) => `${Math.floor(v/60)}h ${Math.floor(v%60)}m`, polarity: false, defaultColor: 'text-white/70' },
                         { label: 'Max DD Duration', key: 'maxDDDuration', fmt: (v: number) => `${Math.floor(v/60)}m ${(v%60).toFixed(0).padStart(2,'0')}s`, polarity: false, defaultColor: 'text-[#F43F5E]' },
-                        { label: 'Stability by regime', key: 'stabilityByRegime', fmt: (v: string) => v, polarity: false, defaultColor: 'text-[#93C5FD]' },
+                        { label: 'Current Regime', key: 'currentRegime', fmt: (v: string) => v, polarity: false, defaultColor: 'text-[#93C5FD]' },
                         { label: 'Out-of-sample perf.', key: 'oosPerformance', fmt: (v: string) => v, polarity: false, defaultColor: 'text-[#10B981]' },
                       ]
                     }
@@ -932,8 +932,17 @@ export default function Dashboard() {
                               const v24 = (metrics?.t24h as any)?.[item.key] ?? '-';
                               
                               const renderVal = (v: any) => {
-                                if (v === '-') return <span className="text-white/20">-</span>;
-                                if (typeof v === 'string') return <span className="text-white/80">{item.fmt(v)}</span>;
+                                if (v === '-' || v === undefined || v === null) return <span className="text-white/20">-</span>;
+                                if (v === 'N/A') return <span className="text-white/40">N/A</span>;
+                                
+                                let formattedStr = '';
+                                try {
+                                  formattedStr = item.fmt(v);
+                                } catch(e) {
+                                  formattedStr = String(v);
+                                }
+
+                                if (typeof v === 'string') return <span className="text-white/80">{formattedStr}</span>;
                                 
                                 let colorClass = 'text-white/80';
                                 if (item.defaultColor) {
@@ -945,7 +954,7 @@ export default function Dashboard() {
                                     colorClass = v > 0 ? 'text-[#F43F5E]' : v < 0 ? 'text-[#10B981]' : 'text-white/50';
                                   }
                                 }
-                                return <span className={`font-semibold ${colorClass}`}>{item.fmt(v)}</span>;
+                                return <span className={`font-semibold ${colorClass}`}>{formattedStr}</span>;
                               };
 
                               return (

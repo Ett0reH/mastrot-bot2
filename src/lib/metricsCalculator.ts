@@ -84,9 +84,9 @@ export function calculateSnapshot(liveState: LiveState | null) {
   const annStdDev = stdDev * Math.sqrt(525600);
   const annDownsideDev = downsideDev * Math.sqrt(525600);
 
-  const sharpe = annStdDev > 0 ? annRet / annStdDev : 0;
-  const sortino = annDownsideDev > 0 ? annRet / annDownsideDev : 0;
-  const calmar = maxDD > 0 ? (cagr > 0 ? cagr : 0) / maxDD : 0;
+  const sharpe = tradesCount >= 30 ? (annStdDev > 0 ? annRet / annStdDev : 0) : 'N/A';
+  const sortino = tradesCount >= 30 ? (annDownsideDev > 0 ? annRet / annDownsideDev : 0) : 'N/A';
+  const calmar = tradesCount >= 30 ? (maxDD > 0 ? (cagr > 0 ? cagr : 0) / maxDD : 0) : 'N/A';
 
   // Trade-specific performance
   let grossProfit = 0;
@@ -116,13 +116,20 @@ export function calculateSnapshot(liveState: LiveState | null) {
   const recoveryFactor = maxDD > 0 ? (netProfit > 0 ? netProfit / (maxDD * startEq) : 0) : 0;
   
   return {
-      totalReturn, cagr, netProfit, avgTrade, maxDD,
-      sharpe, sortino, calmar, ulcerIndex, profitFactor,
+      capitalBase: startEq,
+      totalReturn, totalReturnUnit: 'decimal',
+      cagr, cagrUnit: 'decimal',
+      netProfit, netProfitUnit: 'currency',
+      avgTrade, maxDD, maxDDUnit: 'decimal',
+      sharpe, sortino, calmar, ulcerIndex, ulcerIndexUnit: 'numeric',
+      profitFactor,
       hitRate, expectancy, avgWin, avgLoss, winLossRatio,
-      tradesCount, recoveryFactor, timeUnderWater: maxDDDuration, maxDDDuration,
-      grossProfit, grossLoss, winningTrades, losingTrades, 
-      stabilityByRegime: liveState?.regime || 'UNKNOWN',
-      oosPerformance: '100% (Live)',
+      tradesCount, recoveryFactor,
+      timeUnderWater: maxDDDuration, timeUnderWaterUnit: 'minutes',
+      maxDDDuration, maxDDDurationUnit: 'minutes',
+      grossProfit, grossLoss, grossLossUnit: 'currency', winningTrades, losingTrades, 
+      currentRegime: liveState?.regime || 'UNKNOWN',
+      oosPerformance: netProfit >= 0 ? 'Consistent (Live)' : 'Diverging (Live Loss)',
       costSensitivity: 'High (0.05% fee approx)',
       timestamp: Date.now()
   }
@@ -131,15 +138,21 @@ export function calculateSnapshot(liveState: LiveState | null) {
 // Calculates T0, T-1, T-24h formatted response
 export function calculateMetrics(liveState: LiveState | null) {
   if (!liveState?.metricsHistory || liveState.metricsHistory.length === 0) {
-    const current = calculateSnapshot(liveState);
+    const current = { 
+        ...calculateSnapshot(liveState), 
+        windowStart: liveState?.equityHistory?.[0]?.time || new Date().toISOString(), 
+        windowEnd: new Date().toISOString(), 
+        generatedAt: new Date().toISOString() 
+    };
     return { t0: current, t1: getEmptyStats(), t24h: getEmptyStats() };
   }
 
   const hist = liveState.metricsHistory;
-  const t0 = calculateSnapshot(liveState);
+  const t0 = { ...calculateSnapshot(liveState), windowStart: liveState.equityHistory?.[0]?.time || new Date().toISOString(), windowEnd: new Date().toISOString(), generatedAt: new Date().toISOString() };
   
   const t1Index = Math.max(0, hist.length - 15);
-  const t1 = hist.length > 0 ? hist[t1Index] : t0;
+  const t1Base = hist.length > 0 ? hist[t1Index] : calculateSnapshot(liveState);
+  const t1 = { ...t1Base, windowStart: t1Base.windowStart || new Date(Date.now() - 15 * 60000).toISOString(), windowEnd: new Date().toISOString(), generatedAt: new Date().toISOString() };
 
   const t24Stats = { ...t0 };
   let weightSum = 0;
@@ -182,13 +195,19 @@ export function calculateMetrics(liveState: LiveState | null) {
      t24Stats.avgLoss = avgLossCount > 0 ? avgGL / avgLossCount : 0;
      t24Stats.winLossRatio = t24Stats.avgLoss > 0 ? t24Stats.avgWin / t24Stats.avgLoss : 0;
      t24Stats.expectancy = (t24Stats.hitRate * t24Stats.avgWin) - ((1 - t24Stats.hitRate) * t24Stats.avgLoss);
-     t24Stats.calmar = t24Stats.maxDD > 0 ? (t24Stats.cagr > 0 ? t24Stats.cagr : 0) / t24Stats.maxDD : 0;
+     t24Stats.calmar = typeof t24Stats.maxDD === 'number' && typeof t24Stats.cagr === 'number' && t24Stats.maxDD > 0 ? (t24Stats.cagr > 0 ? t24Stats.cagr : 0) / t24Stats.maxDD : 'N/A';
 
-     t24Stats.stabilityByRegime = t0.stabilityByRegime;
+     t24Stats.currentRegime = t0.currentRegime;
      t24Stats.oosPerformance = t0.oosPerformance;
      t24Stats.costSensitivity = t0.costSensitivity;
+     (t24Stats as any).windowStart = new Date(now - ONE_DAY).toISOString();
+     (t24Stats as any).windowEnd = new Date().toISOString();
+     (t24Stats as any).generatedAt = new Date().toISOString();
   } else {
      Object.assign(t24Stats, getEmptyStats());
+     (t24Stats as any).windowStart = new Date(now - ONE_DAY).toISOString();
+     (t24Stats as any).windowEnd = new Date().toISOString();
+     (t24Stats as any).generatedAt = new Date().toISOString();
   }
 
   return { t0, t1, t24h: t24Stats };
@@ -196,12 +215,14 @@ export function calculateMetrics(liveState: LiveState | null) {
 
 function getEmptyStats() {
     return {
-         totalReturn: 0, cagr: 0, netProfit: 0, avgTrade: 0, maxDD: 0,
-         sharpe: 0, sortino: 0, calmar: 0, ulcerIndex: 0, profitFactor: 0,
+         capitalBase: 10000,
+         totalReturn: 0, totalReturnUnit: 'decimal', cagr: 0, cagrUnit: 'decimal', netProfit: 0, netProfitUnit: 'currency', avgTrade: 0, maxDD: 0, maxDDUnit: 'decimal',
+         sharpe: 'N/A', sortino: 'N/A', calmar: 'N/A', ulcerIndex: 0, ulcerIndexUnit: 'numeric', profitFactor: 0,
          hitRate: 0, expectancy: 0, avgWin: 0, avgLoss: 0, winLossRatio: 0,
-         tradesCount: 0, recoveryFactor: 0, timeUnderWater: 0, maxDDDuration: 0,
-         grossProfit: 0, grossLoss: 0, winningTrades: 0, losingTrades: 0,
-         stabilityByRegime: 'N/A', oosPerformance: 'N/A', costSensitivity: 'N/A'
+         tradesCount: 0, recoveryFactor: 0, timeUnderWater: 0, timeUnderWaterUnit: 'minutes', maxDDDuration: 0, maxDDDurationUnit: 'minutes',
+         grossProfit: 0, grossLoss: 0, grossLossUnit: 'currency', winningTrades: 0, losingTrades: 0,
+         currentRegime: 'N/A', oosPerformance: 'N/A', costSensitivity: 'N/A',
+         windowStart: new Date().toISOString(), windowEnd: new Date().toISOString(), generatedAt: new Date().toISOString()
     };
 }
 

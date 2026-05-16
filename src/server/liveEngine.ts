@@ -189,6 +189,33 @@ async function validateMarketDataFreshness(candles: Bar[], timeframe: string) {
     return true;
 }
 
+const PRECISION_MAP: Record<string, { tick: number, size: number }> = {
+    'BTC': { tick: 0, size: 4 },
+    'XBT': { tick: 0, size: 4 },
+    'ETH': { tick: 1, size: 3 },
+    'SOL': { tick: 2, size: 2 },
+    'LINK': { tick: 3, size: 1 },
+    'ADA': { tick: 5, size: 0 },
+    'XRP': { tick: 5, size: 0 },
+    'DOGE': { tick: 6, size: 0 }
+};
+
+function formatPriceAndSize(symbol: string, price: number, size: number) {
+    let base = symbol.split('/')[0] || '';
+    if (base.includes('-')) base = base.split('-')[0];
+    const p = PRECISION_MAP[base] || { tick: 2, size: 2 };
+    
+    // Round size to given decimals
+    const factorSize = Math.pow(10, p.size);
+    const formattedSize = Math.floor(size * factorSize) / factorSize;
+
+    // Round price to given tick decimals
+    const factorPrice = Math.pow(10, p.tick);
+    const formattedPrice = Math.round(price * factorPrice) / factorPrice;
+
+    return { price: formattedPrice, size: formattedSize };
+}
+
 export async function createProtectedLimitEntryOrder(params: {
     symbol: string,
     side: 'buy' | 'sell',
@@ -202,9 +229,10 @@ export async function createProtectedLimitEntryOrder(params: {
     const { symbol, side, amount, lastPrice, slippageBuffer, timeoutMs, clientOrderId, positionId } = params;
 
     const limitPrice = side === 'buy' ? lastPrice * (1 + slippageBuffer) : lastPrice * (1 - slippageBuffer);
-    const preciseLimitPrice = parseFloat(limitPrice.toFixed(symbol.includes('BTC') ? 1 : 2));
+    
+    const { price: preciseLimitPrice, size: finalAmount } = formatPriceAndSize(symbol, limitPrice, amount);
 
-    console.log(`[LIMIT_ENTRY_INTENT_CREATED] ${side.toUpperCase()} ${amount} ${symbol} @ ${preciseLimitPrice} (Ref: ${lastPrice})`);
+    console.log(`[LIMIT_ENTRY_INTENT_CREATED] ${side.toUpperCase()} ${finalAmount} ${symbol} @ ${preciseLimitPrice} (Ref: ${lastPrice})`);
 
     const intent: OrderIntent = {
         intentId: uuidv4(),
@@ -212,7 +240,7 @@ export async function createProtectedLimitEntryOrder(params: {
         actionType: "ENTRY",
         symbol,
         side,
-        amount,
+        amount: finalAmount,
         price: preciseLimitPrice,
         reduceOnly: false,
         status: IntentStatus.INTENT_CREATED,
@@ -226,7 +254,7 @@ export async function createProtectedLimitEntryOrder(params: {
 
     try {
         await updateIntentStatus(clientOrderId, IntentStatus.SUBMITTED);
-        const orderRes = await exchange.createLimitOrder(symbol, side, amount, preciseLimitPrice, { clientOrderId });
+        const orderRes = await exchange.createLimitOrder(symbol, side, finalAmount, preciseLimitPrice, { clientOrderId });
         await updateIntentStatus(clientOrderId, IntentStatus.ACKNOWLEDGED);
 
         // Wait for execution or timeout
@@ -299,7 +327,9 @@ export async function createProtectedLimitEntryOrder(params: {
 export async function attachNativeProtections(p: ActiveTrade, filledAmount: number) {
     if (!exchange) return;
     
-    console.log(`[NATIVE_SL_INTENT_CREATED] Target SL: ${p.stopLoss} for ${p.symbol}`);
+    const { price: formattedSL, size: formattedSLSize } = formatPriceAndSize(p.symbol, p.stopLoss, filledAmount);
+
+    console.log(`[NATIVE_SL_INTENT_CREATED] Target SL: ${formattedSL} for ${p.symbol}`);
     
     const slClientOrderId = `sl-${p.id.substring(0, 10)}`;
     const intent: OrderIntent = {
@@ -308,8 +338,8 @@ export async function attachNativeProtections(p: ActiveTrade, filledAmount: numb
         actionType: "STOP_LOSS",
         symbol: p.symbol,
         side: p.direction === 'LONG' ? 'sell' : 'buy',
-        amount: filledAmount,
-        triggerPrice: p.stopLoss,
+        amount: formattedSLSize,
+        triggerPrice: formattedSL,
         reduceOnly: true,
         status: IntentStatus.INTENT_CREATED,
         createdAt: new Date().toISOString(),
@@ -322,7 +352,7 @@ export async function attachNativeProtections(p: ActiveTrade, filledAmount: numb
 
     try {
         await updateIntentStatus(slClientOrderId, IntentStatus.SUBMITTED);
-        const slRes = await exchange.updateStopLossOrder(p.symbol, intent.side, filledAmount, p.stopLoss);
+        const slRes = await exchange.updateStopLossOrder(p.symbol, intent.side, formattedSLSize, formattedSL);
         if (slRes && slRes.id) {
             await updateIntentStatus(slClientOrderId, IntentStatus.FILLED); // For SL confirmed means the TRIGGER order is active
             console.log(`[NATIVE_SL_CONFIRMED] Position ${p.symbol} protected. SL Order ID: ${slRes.id}`);
@@ -634,18 +664,23 @@ class KrakenExchangeAdapter {
     }
 
     async createLimitOrder(symbol: string, side: string, amount: number, price: number, params: any = {}) {
+        const { price: formattedPrice, size: formattedSize } = formatPriceAndSize(symbol, price, amount);
         const payload: any = {
             symbol: this.symbolToNative(symbol),
             side: side as 'buy' | 'sell',
-            size: amount,
+            size: formattedSize,
             orderType: 'lmt',
-            limitPrice: price,
+            limitPrice: formattedPrice,
             reduceOnly: params.reduceOnly
         };
         if (params.clientOrderId) {
             payload.cliOrdId = params.clientOrderId;
         }
         const res = await this.client.submitOrder(payload);
+        const status = res.sendStatus?.status;
+        if (status && !['placed', 'partiallyFilled', 'fullyFilled', 'untouched'].includes(status)) {
+             throw new MockCcxtExchangeError(`Kraken rejected order: ${status}`);
+        }
         const returnedId = res.sendStatus?.order_id || (res.sendStatus as any)?.orderEvents?.[0]?.order?.orderId;
         if (returnedId) {
             return { id: returnedId, clientOrderId: params.clientOrderId };
@@ -664,6 +699,7 @@ class KrakenExchangeAdapter {
             const inst = instruments.instruments.find((x: any) => x.symbol === symbolNative);
             if (!inst) throw new Error(`Symbol ${symbol} not found on Kraken Futures`);
 
+            // This is optional for Multi-Collateral accounts, so failure shouldn't block trading
             const res = await this.client.setLeverageSettings({
                 symbol: symbolNative,
                 maxLeverage: desiredLeverage
@@ -675,22 +711,20 @@ class KrakenExchangeAdapter {
             }
             throw new Error((res as any).error || "Unknown error setting leverage");
         } catch (e: any) {
-            if (e.message.includes('not found') || e.message.includes('404')) {
-                // Fallback: Some accounts might not support this endpoint yet or use global settings
-                console.warn(`[LEVERAGE_SET_FAILED] Leverage endpoint not found. Using account default. Risk: MEDIUM.`);
-                return true; // We continue but with warning
-            }
-            console.error(`[LEVERAGE_SET_FAILED] ${e.message}`);
-            return false;
+            const apiErrorMsg = e.body?.error || e.message || String(e);
+            console.warn(`[LEVERAGE_SET_FAILED] Leverage endpoint failed (${apiErrorMsg}). Using account default (Cross Margin). Risk: MEDIUM.`);
+            return true; // We continue but with warning
         }
     }
 
     async updateStopLossOrder(symbol: string, side: string, amount: number, triggerPrice: number, existingOrderId?: string): Promise<{ id: string }> {
+        const { price: formattedPrice, size: formattedSize } = formatPriceAndSize(symbol, triggerPrice, amount);
+        
         if (existingOrderId) {
              const editRes = await this.client.editOrder({
                  orderId: existingOrderId,
-                 stopPrice: triggerPrice,
-                 size: amount
+                 stopPrice: formattedPrice,
+                 size: formattedSize
              });
              const editReturnedId = editRes.editStatus?.orderId;
              if (editReturnedId || editRes.editStatus?.status === 'edited') {
@@ -705,13 +739,17 @@ class KrakenExchangeAdapter {
         const payload: any = {
             symbol: this.symbolToNative(symbol),
             side: side as 'buy' | 'sell',
-            size: amount,
+            size: formattedSize,
             orderType: 'stp',
-            stopPrice: triggerPrice,
+            stopPrice: formattedPrice,
             triggerSignal: 'mark',
             reduceOnly: true
         };
         const res = await this.client.submitOrder(payload);
+        const status = res.sendStatus?.status;
+        if (status && !['placed', 'partiallyFilled', 'fullyFilled', 'untouched'].includes(status)) {
+             throw new Error(`Kraken rejected SL order: ${status}`);
+        }
         const returnedId = res.sendStatus?.order_id || (res.sendStatus as any)?.orderEvents?.[0]?.order?.orderId;
         if (returnedId) {
             return { id: returnedId };
@@ -721,10 +759,11 @@ class KrakenExchangeAdapter {
     }
 
     async createMarketOrder(symbol: string, side: string, amount: number, price?: number, params: any = {}) {
+        const { size } = formatPriceAndSize(symbol, 0, amount);
         const payload: any = {
             symbol: this.symbolToNative(symbol),
             side: side as 'buy' | 'sell',
-            size: amount,
+            size: size,
             orderType: 'mkt',
             reduceOnly: params.reduceOnly
         };
@@ -732,6 +771,10 @@ class KrakenExchangeAdapter {
             payload.cliOrdId = params.clientOrderId; // Pass idempotency key
         }
         const res = await this.client.submitOrder(payload);
+        const status = res.sendStatus?.status;
+        if (status && !['placed', 'partiallyFilled', 'fullyFilled', 'untouched'].includes(status)) {
+             throw new MockCcxtExchangeError(`Kraken rejected order: ${status}`);
+        }
         const returnedId = res.sendStatus?.order_id || (res.sendStatus as any)?.orderEvents?.[0]?.order?.orderId;
         if (returnedId) {
             return { id: returnedId, clientOrderId: params.clientOrderId };
