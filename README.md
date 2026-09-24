@@ -4,6 +4,7 @@ Bot di trading crypto su perpetual lineari di Kraken Futures (`PF_*`), con backt
 
 - Architettura e regole di coerenza: [`mastrot_memo.md`](mastrot_memo.md)
 - Piano di lavoro verso il live test: [`PROMPT_LIVE_READY_KRAKEN.md`](PROMPT_LIVE_READY_KRAKEN.md) e report di fase in [`docs/phase_reports/`](docs/phase_reports/)
+- **Live test:** procedure in [`RUNBOOK_LIVE_TEST.md`](RUNBOOK_LIVE_TEST.md), criteri per partire in [`GO_LIVE_CHECKLIST.md`](GO_LIVE_CHECKLIST.md), prova manuale in demo in [`docs/DEMO_SMOKE_CHECKLIST.md`](docs/DEMO_SMOKE_CHECKLIST.md)
 
 ## Avvio locale
 
@@ -57,13 +58,14 @@ La dashboard chiede l'`ADMIN_TOKEN` al primo accesso e lo salva nel browser.
 | `npm run backtest` | Backtest del motore unico (DecisionCore) con il modello di esecuzione realistico; `-- --profile legacy`, `--window <id>`, `--full`, `--funding constant` |
 | `npm run backtest:legacy` | Backtest legacy (`run_kraken.ts`) sulle finestre del golden |
 | `npm run backtest:compare` | Modello legacy vs realistico e stress sui costi (report in `docs/phase_reports/`) |
-| `npm run replay:parity` | Parità backtest ↔ percorso live in replay (orologio ed exchange simulati) |
+| `npm run replay:parity` | Parità backtest ↔ percorso live in replay (orologio ed exchange simulati); `-- --full` sul dataset completo 2022-2026 (dopo `npm run data:download`: con buchi di oltre 7 giorni si rifiuta) |
 | `npm run golden:check` | Confronta legacy e nuovo motore con i golden versionati (`golden/legacy`, `golden/engine`) |
 | `npm run risk:audit` | Audit dei guardrail sul golden backtest (quante volte ogni limite sarebbe scattato) |
 | `npm run kraken:demo-smoke` | Smoke test dell'execution layer su Kraken **demo** (chiavi demo richieste) |
 | `npm run kraken:demo-kill -- --yes` | Prova del kill switch su Kraken **demo**: chiude tutte le posizioni del conto demo |
 | `npm run dashboard:replay` | Dashboard su dati storici reali in replay (dopo `npm run build`; badge REPLAY), per vederla senza rete verso Kraken |
 | `npm run shadow:report -- --url <bot> --days 3` | Valuta gli ultimi N giorni UTC completi dai report del bot (serve `ADMIN_TOKEN`): superato se ogni giorno ha il confronto col backtest senza divergenze non spiegate |
+| `npm run golive:check -- --url <bot-demo> --days 14` | Criteri misurabili di `GO_LIVE_CHECKLIST.md` sui report della demo: giorni consecutivi, zero posizioni scoperte, zero desync, parità, slippage entro il modello |
 | `npm run data:verify` | Verifica checksum e integrità del dataset |
 | `npm run data:download` | Ricostruisce il dataset completo da Kraken (serve rete verso futures.kraken.com) |
 | `npm run build` / `npm start` | Build di produzione e avvio |

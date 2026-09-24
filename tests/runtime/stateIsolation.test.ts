@@ -28,6 +28,7 @@ test('D51: un\'istanza live non usa lo stato salvato dal bot demo: SAFE_MODE, ne
 
   const live = makeInstance(world, 'L', { mode: 'live' });
   world.clock.t += 20_000;
+  const writes = world.docs.writes;
   assert.equal(await live.runtime.ensureRunning(), 'SAFE_MODE');
   assert.match(live.runtime.lastError ?? '', /demo/, 'il motivo nomina la modalità dello stato trovato');
   assert.equal(refusals(live).length, 1);
@@ -40,6 +41,7 @@ test('D51: un\'istanza live non usa lo stato salvato dal bot demo: SAFE_MODE, ne
   const lease = await world.docs.get<{ holder: string }>('bot_runtime/lease');
   assert.notEqual(lease?.holder, 'L', 'lease mai preso');
   assert.deepEqual(await world.docs.get('bot_runtime/state'), saved, 'stato del bot demo intatto');
+  assert.equal(world.docs.writes, writes, 'nessuna scrittura nell archivio del bot demo (nemmeno gli alert)');
   assert.ok(!live.runtime.health(null).healthy, 'health non sano');
 
   // Il bot demo riparte e ritrova la sua posizione.
@@ -60,8 +62,10 @@ test('D51: un\'istanza shadow sul database del bot demo non subentra nemmeno qua
 
   // Il bot demo si ferma per un deploy: il lease è libero, lo shadow resta fermo.
   await demo.runtime.stop();
+  const writes = world.docs.writes;
   await runUntil(world, [shadow], world.clock.t + 30 * MIN, world.clock.t);
   assert.equal(shadow.runtime.status, 'SAFE_MODE');
+  assert.equal(world.docs.writes, writes, 'nessuna scrittura nell archivio del bot demo');
   const state = await world.docs.get<{ mode: string; port: { kind: string } }>('bot_runtime/state');
   assert.equal(state?.mode, 'demo');
   assert.equal(state?.port.kind, 'kraken', 'lo stato della porta Kraken non è stato sovrascritto');

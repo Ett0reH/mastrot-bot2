@@ -35,6 +35,7 @@ export const INDEX_FIELDS: Readonly<Record<string, readonly string[]>> = {
   equity: ['day'],
   ledger: ['kind', 'date'],
   reports: ['kind', 'day'],
+  alerts: ['day'],
 };
 
 function collectionOf(path: string): string {

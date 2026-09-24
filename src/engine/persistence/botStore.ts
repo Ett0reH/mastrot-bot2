@@ -8,6 +8,7 @@
 //   ledger/{id}            movimenti dell'account log di Kraken (fee, funding, trasferimenti)
 //   reports/daily-{giorno} report giornaliero (F6); reports/checkpoint-{giorno} stato del core a
 //                          inizio giorno, per il confronto con il backtest sugli stessi dati
+//   alerts/{ora}-{codice}-{n}  alert del bot, con il giorno UTC (conteggi del report dopo un riavvio)
 // Si scrive solo quando qualcosa cambia (confronto del contenuto) e le scritture sono contate
 // per giorno UTC: oltre il budget si sospendono quelle non essenziali (journal, equity) con un
 // alert, mai quelle di stato e ordini.
@@ -15,6 +16,7 @@ import type { CoreState } from '../core/decisionCore';
 import type { DecisionRecord, TradeRecord } from '../core/types';
 import type { LedgerEntry } from '../exchange/accountLedger';
 import type { OrderRecord, OrderStore } from '../exchange/orders';
+import type { Alert } from '../ops/alerts';
 import type { DailyReport } from '../ops/dailyReport';
 import type { DayCheckpoint } from '../ops/dayParity';
 import { TERMINAL_STATES } from '../exchange/orders';
@@ -212,7 +214,7 @@ export class BotStore {
   /** Solo reset dello shadow: storico del vecchio stato eliminato (trade, journal, equity, report). */
   async clearHistory(): Promise<number> {
     let deleted = 0;
-    for (const collection of ['trades', 'decisions', 'equity', 'reports']) {
+    for (const collection of ['trades', 'decisions', 'equity', 'reports', 'alerts']) {
       for (const d of await this.docs.query(collection, [])) {
         await this.docs.delete(`${collection}/${d.id}`);
         this.budget.recordWrite();
@@ -221,6 +223,25 @@ export class BotStore {
     }
     this.equityDay = null;
     return deleted;
+  }
+
+  /**
+   * Un alert per documento (`alerts/<ora>-<codice>-<n>`), con il giorno UTC per il report: gli
+   * alert del giorno sopravvivono ai riavvii (D55). Non essenziali: sospesi oltre il budget.
+   */
+  async appendAlert(alert: Alert, seq: number): Promise<boolean> {
+    if (!this.budget.allowOptional()) {
+      this.budget.recordSkip('over_budget');
+      return false;
+    }
+    await this.docs.set(`alerts/${alert.at}-${alert.code}-${seq}`, { ...alert, day: alert.at.slice(0, 10) });
+    this.budget.recordWrite();
+    return true;
+  }
+
+  async alertsOfDay(day: string): Promise<Alert[]> {
+    const docs = await this.docs.query<Alert & { day: string }>('alerts', [{ field: 'day', op: '==', value: day }]);
+    return docs.map(({ data: { day: _day, ...alert } }) => alert).sort((x, y) => x.at.localeCompare(y.at));
   }
 
   async appendTrade(positionId: string, trade: TradeRecord): Promise<void> {

@@ -4,7 +4,7 @@
 ## 1. Visione di Sistema e Architettura Dati
 - **Frequenza Dati:** Il sistema si basa su tick a 15m (15 minuti).
 - **Aggregazione Strategica (Features):** L'ambiente calcola feature strutturali estrapolate a 1H e 4H partendo dai tick a 15m (es. `sma50_1H`, `sma200_4H`, `atr1H`, `rsi1H`).
-- **Capitale e Fees:** Modello configurato su base 10000$ (initialCapital), fee dello 0.05% (0.0005). Slippage e Data Gap Validation integrati nel core.
+- **Capitale e Fees:** Backtest su base 10000$ (initialCapital), fee dello 0.05% (0.0005). La validazione dei buchi nei dati è nel core; slippage (5 bps), funding e backstop nativo (3%) sono nel modello di esecuzione, non nel core (F2). Nel live test il capitale del bot è `CAPITAL_CAP_USD` (default 1.000 $).
 
 ## 2. Motori Strategici (Trading Regimes)
 Il bot smista l'execution su diversi motori in base al Regime del mercato:
@@ -86,3 +86,39 @@ Le logiche di uscita sono complesse e stratificate per preservare l'equità:
 - **Recovery (D49, D50):** gli intenti decisi e mai inviati si inviano dopo la riconciliazione (uscite sempre, ingressi solo entro 10 minuti dalla decisione). I trade chiusi nel tick si salvano prima del checkpoint write-ahead.
 - **Protezione ferma (D54):** 90 s di cicli di protezione (o recovery) falliti → alert critico `PROTECTION_FAILING` e health non sano. Senza Kraken il ciclo decisionale non avanza (riconcilia prima di ogni slot, I10/I13): nessuna decisione e nessun ingresso; al ritorno gli ingressi ormai tardivi non partono.
 - **Caos e shadow run:** `tests/chaos/` (11 scenari con 7 invarianti, 96 ore di shadow con lo scheduler reale); `npm run shadow:report` valuta i report giornalieri di un periodo (gate: 3 giorni UTC con zero divergenze non spiegate). Smoke test in demo: `docs/DEMO_SMOKE_CHECKLIST.md`.
+
+### F8 — Prontezza al live test (completata; demo e decisioni dell'utente da fare)
+- **Documenti operativi:** `RUNBOOK_LIVE_TEST.md` (Kraken, Firestore, deploy, passaggio shadow → demo → live, monitoraggio, kill switch e rollback, procedure per incidente, criteri di arresto) e `GO_LIVE_CHECKLIST.md` (decisioni, prerequisiti, criteri misurabili, firma).
+- **Criteri del go-live misurabili:** `npm run golive:check` valuta 14 giorni di report della demo (giorni consecutivi, zero alert di posizione scoperta, zero desync, parità, slippage contro il modello).
+- **Alert salvati su Firestore** (`alerts/`, D55): il report del giorno li conta anche dopo un riavvio. Li scrive solo l'istanza con il lease.
+- **Run sul dataset completo** (`--full` di `backtest`, `backtest:compare`, `replay:parity`): rifiutati se il dataset ha buchi di oltre 7 giorni (D56). Su buchi così lunghi il backtest userebbe barre vecchie di mesi, il bot dal vivo no.
+
+## 7. Architettura attuale (dopo le fasi F0-F8)
+
+```
+dati 15m (API charts pubblica di Kraken dal vivo, dataset versionato nel backtest)
+  → DecisionCore        puro: candele 15m → 1H/4H UTC, feature, regimi, segnali, tier, sizing;
+                        produce intenti (OPEN / CLOSE / UPDATE_STOP) e il journal di ogni decisione
+  → DecisionCycle       live: slot 15m chiusi, attesa delle candele, recupero degli slot, checkpoint
+                        write-ahead prima dell'esecuzione; prima di ogni slot riconcilia (settle)
+  → GatedExecutionPort  RiskGuard sugli ingressi (limiti del live test, stati operativi); uscite e stop passano
+  → ExecutionPort       SimExecutionPort (shadow, backtest, replay) | KrakenExecutionPort (demo, live):
+                        OrderManager (cliOrdId, stati, riconciliazione) · StopManager (stop nativo reduceOnly)
+                        · KrakenAdapter (unico client, retry solo in lettura, rate limit, circuit breaker)
+BotRuntime             recovery (stato → lease → intenti in sospeso → Kraken → stop → ripresa), scheduler
+                       (decisione a ogni slot 15m, protezione ogni 20 s), kill switch, report giornaliero,
+                       alert, health; un'istanza opera solo con il lease
+BotStore / Firestore   stato, ordini, trade, journal, equity, ledger, report, alert; un database per modalità
+server + dashboard     API con ADMIN_TOKEN, cron (heartbeat) con CRON_TOKEN; dashboard con soli dati reali
+ops                    log JSON con correlation id, canali di alert, heartbeat, metriche, report con la parità
+                       col backtest, valutazione dello shadow run e dei criteri del go-live
+```
+
+**Regole di coerenza (oltre alla sezione 4):**
+- La strategia (`architecture.ts` e il core) non cambia senza un nuovo golden approvato: `npm run golden:check` e `npm run replay:parity` devono restare identici.
+- Il core resta puro: niente I/O, niente orologio, niente parametri d'esecuzione. Costi e backstop stanno nel modello di esecuzione; limiti e stati operativi nel RiskGuard del runtime.
+- Nessun ordine fuori da `OrderManager` e `KrakenAdapter`: cliOrdId deterministico salvato prima dell'invio, un esito incerto resta UNKNOWN finché la riconciliazione non lo chiarisce.
+- Ogni posizione su Kraken ha uno stop nativo reduceOnly verificato; se non si riesce, chiusura d'emergenza entro 60 s.
+- Kraken è la fonte di verità: si riconcilia a ogni ciclo di protezione, prima di ogni slot e a ogni avvio.
+- Solo l'istanza con il lease scrive, su Kraken e su Firestore. Lo stato di un'altra modalità non si usa mai.
+- Ogni guasto che lascia il bot senza controllo deve produrre un alert: niente fallback silenziosi.

@@ -7,6 +7,7 @@ import { type BacktestProfile, CONSTANT_FUNDING_HOURLY, LEGACY_PROFILE, REALISTI
 import { type Metrics, computeMetrics, fmt, groupBy } from '../../src/engine/backtest/report';
 import { type BacktestResult, loadBacktestData, runBacktest } from '../../src/engine/backtest/runner';
 import { FULL_REFERENCE_WINDOW, GOLDEN_WINDOWS, type GoldenWindow } from '../golden/windows';
+import { assertCompleteDataset } from './fullDataset';
 
 const SCENARIOS: BacktestProfile[] = [
   LEGACY_PROFILE,
@@ -52,6 +53,7 @@ function main(): void {
   const rows: Row[] = [];
   for (const window of windows) {
     const data = loadBacktestData({ symbols: window.symbols, start: window.start, end: window.end, warmupDays: 50, initialEquity: 10000, execution: LEGACY_PROFILE.execution, backstop: LEGACY_PROFILE.backstop, funding: LEGACY_PROFILE.funding });
+    if (args.includes('--full')) assertCompleteDataset(data, Date.parse(window.start) - 50 * 86_400_000, Date.parse(window.end));
     for (const profile of SCENARIOS) {
       const row = run(window, profile, data);
       rows.push(row);

@@ -13,6 +13,7 @@ import {
   defaultDatasetRoot,
   encodeChunk,
   loadCandles,
+  longGaps,
   readManifest,
   validateCandles,
   verifyDataset,
@@ -109,4 +110,21 @@ test('writeSymbolCandles rifiuta candele non valide', () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('buchi lunghi nella finestra: inizio e fine scoperti e buchi interni oltre la soglia (run sul dataset completo)', () => {
+  const t0 = Date.parse('2022-01-01T00:00:00Z');
+  const day = 86_400_000;
+  const bars = (from: number, to: number) => {
+    const out: Candle[] = [];
+    for (let t = from; t <= to; t += BAR_15M_MS) out.push({ t, o: 1, h: 1, l: 1, c: 1, v: 1 });
+    return out;
+  };
+  // Dati dal giorno 2 al 30, poi dal 60 al 90: scoperti l'inizio (2 giorni) e 30 giorni in mezzo.
+  const candles = [...bars(t0 + 2 * day, t0 + 30 * day), ...bars(t0 + 60 * day, t0 + 90 * day)];
+  assert.deepEqual(longGaps(candles, t0, t0 + 90 * day, 7 * day), [{ from: new Date(t0 + 30 * day + BAR_15M_MS).toISOString(), to: new Date(t0 + 60 * day - BAR_15M_MS).toISOString() }]);
+  assert.equal(longGaps(candles, t0, t0 + 90 * day, day).length, 2, 'con soglia di un giorno anche l inizio scoperto');
+  assert.equal(longGaps(candles, t0, t0 + 100 * day, 7 * day).length, 2, 'fine scoperta di 10 giorni');
+  assert.deepEqual(longGaps([], t0, t0 + 10 * day, 7 * day), [{ from: new Date(t0).toISOString(), to: new Date(t0 + 10 * day).toISOString() }]);
+  assert.deepEqual(longGaps(bars(t0, t0 + 20 * day), t0, t0 + 20 * day, 7 * day), [], 'dati continui: nessun buco');
 });

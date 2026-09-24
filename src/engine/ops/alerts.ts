@@ -91,13 +91,28 @@ export class LogAlertSink implements AlertSink {
  */
 export class RecordingAlertSink implements AlertSink {
   readonly recent: Alert[] = [];
+  /** Alert non ancora salvati nell'archivio (il runtime li salva a ogni ciclo, D55). */
+  private unsaved: Alert[] = [];
 
-  constructor(private readonly inner: AlertSink, private readonly limit = 100) {}
+  constructor(private readonly inner: AlertSink, private readonly limit = 100, private readonly unsavedLimit = 1_000) {}
 
   async send(alert: Alert): Promise<void> {
     this.recent.push(alert);
     if (this.recent.length > this.limit) this.recent.splice(0, this.recent.length - this.limit);
+    this.unsaved.push(alert);
+    if (this.unsaved.length > this.unsavedLimit) this.unsaved.splice(0, this.unsaved.length - this.unsavedLimit);
     await this.inner.send(alert);
+  }
+
+  /** Alert da salvare, dal più vecchio; quelli non salvati si rimettono in coda con `requeue`. */
+  drainUnsaved(): Alert[] {
+    const out = this.unsaved;
+    this.unsaved = [];
+    return out;
+  }
+
+  requeue(alerts: readonly Alert[]): void {
+    this.unsaved = [...alerts, ...this.unsaved].slice(-this.unsavedLimit);
   }
 }
 

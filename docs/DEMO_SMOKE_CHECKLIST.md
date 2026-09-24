@@ -1,6 +1,6 @@
 # Smoke test end-to-end su Kraken Futures DEMO — checklist manuale (F7)
 
-Scopo: provare **sul conto demo di Kraken, con il bot vero** (server, runtime, Firestore, alert, dashboard), ciò che i test automatici provano con l'exchange simulato (`tests/chaos/`, `tests/runtime/`). È anche il primo giorno dei 14 giorni di demo richiesti da [`GO_LIVE_CHECKLIST.md`](GO_LIVE_CHECKLIST.md).
+Scopo: provare **sul conto demo di Kraken, con il bot vero** (server, runtime, Firestore, alert, dashboard), ciò che i test automatici provano con l'exchange simulato (`tests/chaos/`, `tests/runtime/`). Precede i 14 giorni di demo richiesti da [`GO_LIVE_CHECKLIST.md`](../GO_LIVE_CHECKLIST.md), che partono dopo, senza guasti provocati.
 
 Regole:
 
@@ -37,7 +37,7 @@ TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
 ADMIN_TOKEN=...
 CRON_TOKEN=...
-# Limiti: gli stessi previsti per il live test (vedi .env.example e RUNBOOK_LIVE_TEST.md)
+# Limiti: gli stessi previsti per il live test (GO_LIVE_CHECKLIST.md, decisione A2)
 CAPITAL_CAP_USD=1000
 MAX_LEVERAGE=3
 MAX_POSITION_NOTIONAL_USD=1000
@@ -131,4 +131,4 @@ Il bot **non** deve girare durante questi due script: usano lo stesso conto.
 ## Esito
 
 - Smoke test **superato** se tutti i punti delle sezioni 0-7 sono ✅ (la 4 appena la strategia apre la prima posizione).
-- Da qui partono i 14 giorni di demo di [`GO_LIVE_CHECKLIST.md`](GO_LIVE_CHECKLIST.md): ogni giorno `npm run shadow:report -- --url $BOT --days 1` e controllo del report.
+- Da qui partono i 14 giorni di demo di [`GO_LIVE_CHECKLIST.md`](../GO_LIVE_CHECKLIST.md), senza più guasti provocati: ogni giorno il report (alert `DAILY_REPORT`), alla fine `npm run golive:check -- --url $BOT --days 14`. Procedure: [`RUNBOOK_LIVE_TEST.md`](../RUNBOOK_LIVE_TEST.md).

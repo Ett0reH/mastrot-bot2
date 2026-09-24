@@ -2,6 +2,7 @@
 // sugli stessi dati (dal checkpoint del core di inizio giorno). Dati reali del 21-23 gennaio 2022.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { evaluateGoLive } from '../../src/engine/ops/goLive';
 import { makeInstance, makeWorld, step, tickTimes, type World } from './world';
 
 const END = '2022-01-23T23:45:00Z';
@@ -83,4 +84,38 @@ test('demo: report dopo la lettura del ledger, parità con i fill reali, fee coe
   const metrics = b.runtime.metrics();
   assert.equal(metrics.ledgerCheck.consistent, true, 'PnL dei trade = equity realizzata − capitale anche dopo il riavvio');
   assert.equal(metrics.trades.count, b.runtime.allTrades.length);
+});
+
+test('D55: il report conta gli alert di tutto il giorno anche dopo un riavvio (alert salvati su Firestore)', async () => {
+  const world = makeWorld('2022-01-21T00:00:00Z', END);
+  const a = makeInstance(world, 'A');
+  await a.runtime.ensureRunning();
+  await runUntil(world, a, Date.parse('2022-01-22T08:40:00Z'), world.startMs, true);
+  // Stop cancellato a mano la mattina del 22: STOP_MISSING e poi STOP_RESTORED.
+  const stop = [...world.fake.orders.values()].find((o) => o.status === 'open' && o.type === 'stp');
+  assert.ok(stop?.cliOrdId, 'uno stop aperto da cancellare');
+  world.fake.dropOrder(stop.cliOrdId);
+  await runUntil(world, a, Date.parse('2022-01-22T12:00:00Z'), world.clock.t, true);
+  assert.ok(a.alerts.codes().includes('STOP_MISSING'));
+  // Riavvio a metà giornata: il nuovo processo non ha in memoria gli alert della mattina.
+  a.state.alive = false;
+  world.clock.t += 70_000;
+  const b = makeInstance(world, 'B');
+  await runUntil(world, b, Date.parse('2022-01-23T00:45:00Z'), world.clock.t, true);
+  await b.runtime.flushReports();
+  const day22 = (await b.runtime.dailyReport('2022-01-22'))!;
+  assert.ok(day22, 'report del 22');
+  assert.equal(day22.alerts.byCode.STOP_MISSING, 1, `alert del 22: ${JSON.stringify(day22.alerts.byCode)}`);
+  assert.equal(day22.alerts.byCode.STOP_RESTORED, 1);
+  assert.ok(day22.alerts.critical >= 1);
+  assert.ok(day22.issues.some((i) => /alert critici/.test(i)));
+  // I criteri del go-live, calcolati sui report veri, trovano lo stop mancante del 22 (prima del riavvio).
+  const e = evaluateGoLive(await b.runtime.dailyReports(), '2022-01-21', '2022-01-22', 2);
+  const byId = Object.fromEntries(e.criteria.map((c) => [c.id, c]));
+  assert.equal(byId.days.ok, true, byId.days.detail);
+  assert.equal(byId.protection.ok, false);
+  assert.match(byId.protection.detail, /2022-01-22 STOP_MISSING×1/);
+  assert.equal(byId.desync.ok, true, byId.desync.detail);
+  assert.equal(byId.parity.ok, true, byId.parity.detail);
+  assert.equal(e.ok, false);
 });

@@ -158,6 +158,28 @@ export function computeCoverage(candles: readonly Candle[]): DatasetRange[] {
   return ranges;
 }
 
+/**
+ * Tratti della finestra [fromMs, toMs] senza candele per più di `maxGapMs` (compresi l'inizio e la
+ * fine non coperti). Con buchi così lunghi il backtest calcolerebbe le feature su barre vecchie di
+ * mesi, mentre il bot dal vivo ricostruisce solo la storia recente: i run sul dataset completo li
+ * rifiutano.
+ */
+export function longGaps(candles: readonly Candle[], fromMs: number, toMs: number, maxGapMs: number): DatasetRange[] {
+  const inWindow = candles.filter((c) => c.t >= fromMs && c.t <= toMs);
+  const out: DatasetRange[] = [];
+  const hole = (from: number, to: number) => {
+    if (to - from > maxGapMs) out.push({ from: isoOf(from), to: isoOf(to) });
+  };
+  if (inWindow.length === 0) {
+    hole(fromMs, toMs);
+    return out;
+  }
+  hole(fromMs, inWindow[0].t - BAR_15M_MS);
+  for (let i = 1; i < inWindow.length; i++) hole(inWindow[i - 1].t + BAR_15M_MS, inWindow[i].t - BAR_15M_MS);
+  hole(inWindow[inWindow.length - 1].t + BAR_15M_MS, toMs);
+  return out;
+}
+
 // --- Serializzazione dei chunk -----------------------------------------------------------
 
 interface ChunkFile {

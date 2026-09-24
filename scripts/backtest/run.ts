@@ -9,9 +9,10 @@
 import { writeFileSync } from 'node:fs';
 import { CONSTANT_FUNDING_HOURLY, LEGACY_PROFILE, REALISTIC_PROFILE } from '../../src/engine/backtest/profiles';
 import { computeMetrics, fmt, groupBy } from '../../src/engine/backtest/report';
-import { runBacktest } from '../../src/engine/backtest/runner';
+import { loadBacktestData, runBacktest } from '../../src/engine/backtest/runner';
 import { canonicalStringify } from '../../src/engine/util/canonical';
 import { FULL_REFERENCE_WINDOW, GOLDEN_WINDOWS } from '../golden/windows';
+import { assertCompleteDataset } from './fullDataset';
 
 function arg(name: string): string | undefined {
   const args = process.argv.slice(2);
@@ -32,7 +33,10 @@ function main(): void {
   if (windows.length === 0) throw new Error(`Finestra sconosciuta: ${only}`);
   const out: Record<string, unknown> = {};
   for (const w of windows) {
-    const result = runBacktest({ symbols: w.symbols, start: w.start, end: w.end, warmupDays: 50, initialEquity: 10000, execution: base.execution, backstop: base.backstop, funding });
+    const config = { symbols: w.symbols, start: w.start, end: w.end, warmupDays: 50, initialEquity: 10000, execution: base.execution, backstop: base.backstop, funding };
+    const data = loadBacktestData(config);
+    if (args.includes('--full')) assertCompleteDataset(data, Date.parse(w.start) - 50 * 86_400_000, Date.parse(w.end));
+    const result = runBacktest(config, data);
     const m = computeMetrics(result, 10000, w.start, w.end);
     console.log(`${w.id} [${base.label}${fundingArg === 'constant' ? ' + funding' : ''}]`);
     console.log(`  trade ${m.trades} · PnL ${fmt.usd(m.netPnL)} (${fmt.pct(m.totalReturnPct)}) · max DD ${m.maxDrawdownPct.toFixed(2)}% · PF ${fmt.pf(m.profitFactor)} · win rate ${m.winRatePct.toFixed(1)}% · Sharpe ${fmt.num(m.sharpe)}`);

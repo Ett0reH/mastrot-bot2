@@ -193,6 +193,7 @@ export class BotRuntime {
   readonly allTrades: TradeRecord[] = [];
   private readonly reportTasks = new Set<Promise<void>>();
   private readonly savedTrades = new Set<string>();
+  private alertSeq = 0;
   private readonly reporting = new Set<string>();
   latestReport: DailyReport | null = null;
   private lock: Promise<unknown> = Promise.resolve();
@@ -254,6 +255,38 @@ export class BotRuntime {
     } catch (err) {
       this.log('error', `Invio dell'alert ${code} fallito: ${(err as Error).message}`);
     }
+  }
+
+  /**
+   * Salva nell'archivio gli alert di tutti i componenti (runtime, porta Kraken, StopManager): il
+   * report del giorno li conta anche dopo un riavvio (D55). Solo l'istanza con il lease scrive:
+   * un'istanza in standby o rifiutata non tocca l'archivio di un altro bot.
+   */
+  private async persistAlerts(): Promise<void> {
+    if (this.deps.lease.canWrite() !== null) return;
+    const pending = this.alertSink.drainUnsaved();
+    for (let i = 0; i < pending.length; i++) {
+      try {
+        await this.deps.store.appendAlert(pending[i], this.alertSeq++);
+      } catch (err) {
+        this.alertSink.requeue(pending.slice(i));
+        this.log('warn', `alert non salvati: ${(err as Error).message}`);
+        return;
+      }
+    }
+  }
+
+  /** Alert di un giorno: quelli salvati più quelli ancora in memoria (senza doppioni). */
+  private async alertsOfDay(day: string): Promise<Alert[]> {
+    let stored: Alert[] = [];
+    try {
+      stored = await this.deps.store.alertsOfDay(day);
+    } catch (err) {
+      this.log('warn', `alert del ${day} non letti dall'archivio: ${(err as Error).message}`);
+    }
+    const key = (a: Alert) => `${a.at}|${a.code}|${a.message}`;
+    const seen = new Set(stored.map(key));
+    return [...stored, ...this.recentAlerts.filter((a) => a.at.startsWith(day) && !seen.has(key(a)))].sort((x, y) => x.at.localeCompare(y.at));
   }
 
   /** Alert da componenti esterni al runtime (heartbeat, prova del canale): stessa coda e stesso canale. */
@@ -674,7 +707,7 @@ export class BotRuntime {
       ledger: this.deps.kraken ? await this.deps.store.ledgerOfDay(day) : null,
       modelSlippageBps: REALISTIC_PROFILE.execution.slippageBps,
       parity,
-      alerts: this.recentAlerts.filter((a) => a.at.startsWith(day)),
+      alerts: await this.alertsOfDay(day),
     });
     await this.deps.store.saveDailyReport(report);
     this.latestReport = report;
@@ -936,57 +969,66 @@ export class BotRuntime {
 
   protectionTick(now: number): Promise<void> {
     return this.inCycle('P', async () => {
-      if (this.status !== 'RUNNING' && (await this.recover()) !== 'RUNNING') return;
-      if (!(await this.deps.lease.renew())) {
-        await this.onLeaseLost();
-        return;
-      }
-      this.counters.protectionTicks++;
-      // Una lettura fallita del flag non deve fermare la protezione (stop e riconciliazione).
-      let flag = false;
       try {
-        flag = this.risk.opState === 'RUNNING' || this.risk.opState === 'REDUCE_ONLY' ? await this.controlFlag() : false;
+        await this.protectionStep(now);
+      } finally {
+        // Anche quando il ciclo esce prima (recovery, lease, kill switch): gli alert vanno salvati.
+        await this.persistAlerts();
+      }
+    });
+  }
+
+  private async protectionStep(now: number): Promise<void> {
+    if (this.status !== 'RUNNING' && (await this.recover()) !== 'RUNNING') return;
+    if (!(await this.deps.lease.renew())) {
+      await this.onLeaseLost();
+      return;
+    }
+    this.counters.protectionTicks++;
+    // Una lettura fallita del flag non deve fermare la protezione (stop e riconciliazione).
+    let flag = false;
+    try {
+      flag = this.risk.opState === 'RUNNING' || this.risk.opState === 'REDUCE_ONLY' ? await this.controlFlag() : false;
+    } catch (err) {
+      this.lastError = `flag del kill switch non letto: ${(err as Error).message}`;
+      this.log('warn', this.lastError);
+    }
+    if (flag) {
+      this.risk.killRun = { runId: new Date(now).toISOString().replace(/[^0-9]/g, '').slice(0, 14), source: 'flag Firestore', requestedAt: new Date(now).toISOString() };
+      this.risk.opState = 'HALTING';
+      await this.persist();
+      await this.alert('critical', 'KILL_SWITCH', 'Kill switch attivato dal flag su Firestore: chiusura di tutte le posizioni');
+    }
+    if (this.risk.opState === 'HALTING') {
+      // Il kill switch ha la precedenza sulla protezione ordinaria; si ripete finché non è flat.
+      try {
+        await this.killStep();
+        await this.trackProtection(now, null);
       } catch (err) {
-        this.lastError = `flag del kill switch non letto: ${(err as Error).message}`;
+        this.lastError = `kill switch: ${(err as Error).message}`;
+        this.log('warn', this.lastError);
+        await this.persist();
+        await this.trackProtection(now, this.lastError);
+      }
+      return;
+    }
+    if (this.port instanceof KrakenExecutionPort) {
+      let protectedOk = false;
+      try {
+        await this.port.protect();
+        protectedOk = true;
+        await this.updateSizingCap();
+        await this.syncLedger(now);
+      } catch (err) {
+        this.lastError = `ciclo di protezione: ${(err as Error).message}`;
         this.log('warn', this.lastError);
       }
-      if (flag) {
-        this.risk.killRun = { runId: new Date(now).toISOString().replace(/[^0-9]/g, '').slice(0, 14), source: 'flag Firestore', requestedAt: new Date(now).toISOString() };
-        this.risk.opState = 'HALTING';
-        await this.persist();
-        await this.alert('critical', 'KILL_SWITCH', 'Kill switch attivato dal flag su Firestore: chiusura di tutte le posizioni');
-      }
-      if (this.risk.opState === 'HALTING') {
-        // Il kill switch ha la precedenza sulla protezione ordinaria; si ripete finché non è flat.
-        try {
-          await this.killStep();
-          await this.trackProtection(now, null);
-        } catch (err) {
-          this.lastError = `kill switch: ${(err as Error).message}`;
-          this.log('warn', this.lastError);
-          await this.persist();
-          await this.trackProtection(now, this.lastError);
-        }
-        return;
-      }
-      if (this.port instanceof KrakenExecutionPort) {
-        let protectedOk = false;
-        try {
-          await this.port.protect();
-          protectedOk = true;
-          await this.updateSizingCap();
-          await this.syncLedger(now);
-        } catch (err) {
-          this.lastError = `ciclo di protezione: ${(err as Error).message}`;
-          this.log('warn', this.lastError);
-        }
-        // Conta solo la protezione (riconciliazione e stop): sizing e ledger si ripetono da soli.
-        await this.trackProtection(now, protectedOk ? null : this.lastError);
-      }
-      await this.checkStaleData(now);
-      await this.persist();
-      await this.dailyMaintenance(now);
-    });
+      // Conta solo la protezione (riconciliazione e stop): sizing e ledger si ripetono da soli.
+      await this.trackProtection(now, protectedOk ? null : this.lastError);
+    }
+    await this.checkStaleData(now);
+    await this.persist();
+    await this.dailyMaintenance(now);
   }
 
   /** Equity di sizing limitata dal collateral del conto di trading (D28). */
