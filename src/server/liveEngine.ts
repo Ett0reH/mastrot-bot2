@@ -17,6 +17,9 @@ import {
     SignalDirection
 } from './core/architecture';
 import { v4 as uuidv4 } from 'uuid';
+import { ccxtWithRetry, delaySleep, resolveOrderAmount, withTimeout } from './liveEngineUtils';
+
+export { ccxtWithRetry, resolveOrderAmount, withTimeout };
 
 let db: any = null;
 let expectancyMatrixLoaded = false;
@@ -410,20 +413,6 @@ async function reconcilePendingIntents() {
 let initialStateLoaded = false;
 let loadStatePromise: Promise<void> | null = null;
 let loadAttempts = 0;
-
-// Utility to wrap a promise with a timeout to prevent infinite hanging and memory leaks
-export function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operationName: string = 'Operation'): Promise<T> {
-  let timeoutId: NodeJS.Timeout;
-  const timeoutPromise = new Promise<T>((_, reject) => {
-    timeoutId = setTimeout(() => {
-      reject(new Error(`${operationName} timed out after ${timeoutMs}ms. Please check network or quotas.`));
-    }, timeoutMs);
-  });
-
-  return Promise.race([promise, timeoutPromise]).finally(() => {
-    clearTimeout(timeoutId);
-  });
-}
 
 async function loadInitialState(): Promise<void> {
   if (initialStateLoaded) return;
@@ -1066,54 +1055,6 @@ export async function initExchange() {
   }
 }
 
-function delaySleep(ms: number) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-export async function ccxtWithRetry<T>(fn: () => Promise<T>, retries = 6, delay = 2000): Promise<T> {
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await withTimeout(fn(), 30000, 'CCXT API Call');
-    } catch (error: any) {
-      if (i === retries - 1) throw error;
-      
-      const errMsg = error?.body?.error || error?.message || String(error);
-      const isTransient = 
-        error instanceof ccxt.NetworkError || 
-        (error instanceof ccxt.ExchangeError && !errMsg.toLowerCase().includes('invalid') && !errMsg.toLowerCase().includes('balance') && !errMsg.toLowerCase().includes('margin') && !errMsg.toLowerCase().includes('position')) || 
-        errMsg.includes('Rate limit exceeded') ||
-        errMsg.includes('timeout') ||
-        errMsg.includes('network') ||
-        errMsg.includes('ECONNRESET') ||
-        errMsg.includes('502') ||
-        errMsg.includes('503') ||
-        errMsg.includes('Service Unavailable') ||
-        error?.code === 429 ||
-        error?.code === 502 ||
-        error?.code === 503 ||
-        error?.code === 500;
-      
-      if (isTransient) {
-        // Suppress Service Unavailable spam as Kraken Sandbox drops frequently
-        if (errMsg.includes('Service Unavailable') || errMsg.includes('Rate limit') || errMsg.includes('503')) {
-            if (i > 1) {
-                console.log(`[Kraken Sync] API 503/Rate-limited. Waiting ${delay}ms before retry ${i + 1}/${retries}...`);
-            }
-        } else {
-            if (i > 0) {
-                console.warn(`[Retry ${i + 1}/${retries}] API Transient Update: ${errMsg}. Retrying in ${delay}ms...`);
-            }
-        }
-        await delaySleep(delay);
-        delay = Math.min(delay * 1.5, 10000); // capped exponential backoff
-      } else {
-        throw error;
-      }
-    }
-  }
-  throw new Error("Unreachable");
-}
-
 export async function getLiveState(): Promise<LiveState> {
   if (!initialStateLoaded) {
     if (!loadStatePromise) loadStatePromise = loadInitialState().catch(e => { loadStatePromise = null; throw e; });
@@ -1498,45 +1439,6 @@ function filterClosedCandles(candles: Bar[], timeframe: string, nowMs: number): 
         return candles.slice(0, -1);
     }
     return candles;
-}
-
-export function resolveOrderAmount(exchange: any, symbol: string, rawAmount: number, price: number) {
-    let ok = true;
-    let reason = "OK";
-    let minAmount = 0;
-    let minCost = 0;
-    
-    const market = exchange.markets ? exchange.markets[symbol] : null;
-    if (market && market.limits) {
-         if (market.limits.amount && market.limits.amount.min) minAmount = market.limits.amount.min;
-         if (market.limits.cost && market.limits.cost.min) minCost = market.limits.cost.min;
-    }
-
-    if (rawAmount <= 0) {
-        return { ok: false, amount: 0, reason: "Amount must be positive", rawAmount, precisionAmount: 0, minAmount, minCost };
-    }
-
-    let precisionAmountStr = exchange.amountToPrecision ? exchange.amountToPrecision(symbol, rawAmount) : rawAmount.toString();
-    let precisionAmount = Number(precisionAmountStr);
-    
-    if (precisionAmount <= 0) {
-        return { ok: false, amount: 0, reason: "Amount truncated to zero by precision", rawAmount, precisionAmount, minAmount, minCost };
-    }
-
-    if (minAmount > 0 && precisionAmount < minAmount) {
-        ok = false; reason = `Amount ${precisionAmount} below min limits ${minAmount}`;
-        return { ok, amount: precisionAmount, reason, rawAmount, precisionAmount, minAmount, minCost };
-    }
-    
-    const notional = precisionAmount * price;
-    if (minCost > 0 && notional < minCost) {
-        ok = false; reason = `Notional ${notional} below min cost ${minCost}`;
-        return { ok, amount: precisionAmount, reason, rawAmount, precisionAmount, minAmount, minCost };
-    }
-
-    return {
-        ok, amount: precisionAmount, reason, rawAmount, precisionAmount, minAmount, minCost
-    };
 }
 
 async function precomputeLiveOHLCV() {

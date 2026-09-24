@@ -1,0 +1,377 @@
+{
+  "version": 1,
+  "exchange": "kraken-futures",
+  "resolution": "15m",
+  "symbols": {
+    "ADA": {
+      "native": "PF_ADAUSD",
+      "chunks": [
+        {
+          "file": "ADA/2021.json.gz",
+          "from": "2021-11-12T00:00:00.000Z",
+          "to": "2021-12-31T23:45:00.000Z",
+          "bars": 4800,
+          "sha256": "142f8bdc827dadfa2dbe4815d014f201519b0a84c5b2a01e85efc951f9350587",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/ADA_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/ADA_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        },
+        {
+          "file": "ADA/2022.json.gz",
+          "from": "2022-01-01T00:00:00.000Z",
+          "to": "2022-07-08T18:15:00.000Z",
+          "bars": 18122,
+          "sha256": "86cdfc79421589b51705f086fc2f4118c2550c421c00758b0fe0872be8e44f0e",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/ADA_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/ADA_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        },
+        {
+          "file": "ADA/2026.json.gz",
+          "from": "2026-03-04T00:00:00.000Z",
+          "to": "2026-05-09T00:00:00.000Z",
+          "bars": 6337,
+          "sha256": "17b019c4cd429b3924218e3c9950adece69adedd9421093a60bb9390e339384d",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/ADA_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/ADA_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        }
+      ],
+      "coverage": [
+        {
+          "from": "2021-11-12T00:00:00.000Z",
+          "to": "2022-07-08T18:15:00.000Z"
+        },
+        {
+          "from": "2026-03-04T00:00:00.000Z",
+          "to": "2026-05-09T00:00:00.000Z"
+        }
+      ],
+      "gaps": [
+        {
+          "after": "2022-07-08T18:15:00.000Z",
+          "before": "2026-03-04T00:00:00.000Z",
+          "minutes": 1921305
+        }
+      ]
+    },
+    "AVAX": {
+      "native": "PF_AVAXUSD",
+      "chunks": [
+        {
+          "file": "AVAX/2021.json.gz",
+          "from": "2021-11-12T00:00:00.000Z",
+          "to": "2021-12-31T23:45:00.000Z",
+          "bars": 4800,
+          "sha256": "61e61ef3e83a72145b9f1febcff7491ffd8d3c38f3ec35b9ae68102390e0b86b",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/AVAX_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato)"
+        },
+        {
+          "file": "AVAX/2022.json.gz",
+          "from": "2022-01-01T00:00:00.000Z",
+          "to": "2022-07-12T16:30:00.000Z",
+          "bars": 18499,
+          "sha256": "16fd50796d05a58efddf138f1ef205c103d9261143441e4f4ddeebbef37901fb",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/AVAX_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato)"
+        }
+      ],
+      "coverage": [
+        {
+          "from": "2021-11-12T00:00:00.000Z",
+          "to": "2022-07-12T16:30:00.000Z"
+        }
+      ],
+      "gaps": []
+    },
+    "BTC": {
+      "native": "PF_XBTUSD",
+      "chunks": [
+        {
+          "file": "BTC/2021.json.gz",
+          "from": "2021-11-12T00:00:00.000Z",
+          "to": "2021-12-31T23:45:00.000Z",
+          "bars": 4800,
+          "sha256": "fca7501b1bf619d201d67e52bf063ee8f2107fb361b3505e7f3d28ca1659c25d",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/BTC_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/BTC_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        },
+        {
+          "file": "BTC/2022.json.gz",
+          "from": "2022-01-01T00:00:00.000Z",
+          "to": "2022-06-13T20:00:00.000Z",
+          "bars": 15729,
+          "sha256": "89ae129223a3e9c9a0b1850286491af1e8bd1196bbdae150b0ef24054a6383d8",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/BTC_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/BTC_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        },
+        {
+          "file": "BTC/2026.json.gz",
+          "from": "2026-03-04T00:00:00.000Z",
+          "to": "2026-05-09T00:00:00.000Z",
+          "bars": 6337,
+          "sha256": "aa9b97af1bf761df602a864cb61d0210d0864033ce0466c4ea52bb153f21fad6",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/BTC_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/BTC_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        }
+      ],
+      "coverage": [
+        {
+          "from": "2021-11-12T00:00:00.000Z",
+          "to": "2022-06-13T20:00:00.000Z"
+        },
+        {
+          "from": "2026-03-04T00:00:00.000Z",
+          "to": "2026-05-09T00:00:00.000Z"
+        }
+      ],
+      "gaps": [
+        {
+          "after": "2022-06-13T20:00:00.000Z",
+          "before": "2026-03-04T00:00:00.000Z",
+          "minutes": 1957200
+        }
+      ]
+    },
+    "DOGE": {
+      "native": "PF_DOGEUSD",
+      "chunks": [
+        {
+          "file": "DOGE/2021.json.gz",
+          "from": "2021-11-12T00:00:00.000Z",
+          "to": "2021-12-31T23:45:00.000Z",
+          "bars": 4800,
+          "sha256": "df2c439e3dc14fb6e55681fb15678d6e5ece71d975f84e76f51d2e55ede6ade0",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/DOGE_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/DOGE_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        },
+        {
+          "file": "DOGE/2022.json.gz",
+          "from": "2022-01-01T00:00:00.000Z",
+          "to": "2022-07-02T20:45:00.000Z",
+          "bars": 17556,
+          "sha256": "9f0bb2dc928979310fbede5392ae67f7cc03084152b50a9f681128b4eacbe324",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/DOGE_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/DOGE_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        },
+        {
+          "file": "DOGE/2026.json.gz",
+          "from": "2026-03-04T00:00:00.000Z",
+          "to": "2026-05-09T00:00:00.000Z",
+          "bars": 6337,
+          "sha256": "f006bfca07fb3fa9f3ac8dadb5da0f69007ff451a4a7f15382bf4c3586c63426",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/DOGE_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/DOGE_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        }
+      ],
+      "coverage": [
+        {
+          "from": "2021-11-12T00:00:00.000Z",
+          "to": "2022-07-02T20:45:00.000Z"
+        },
+        {
+          "from": "2026-03-04T00:00:00.000Z",
+          "to": "2026-05-09T00:00:00.000Z"
+        }
+      ],
+      "gaps": [
+        {
+          "after": "2022-07-02T20:45:00.000Z",
+          "before": "2026-03-04T00:00:00.000Z",
+          "minutes": 1929795
+        }
+      ]
+    },
+    "ETH": {
+      "native": "PF_ETHUSD",
+      "chunks": [
+        {
+          "file": "ETH/2021.json.gz",
+          "from": "2021-11-12T00:00:00.000Z",
+          "to": "2021-12-31T23:45:00.000Z",
+          "bars": 4800,
+          "sha256": "1b03652c062c1efd30eb687830fa25be162647712cb08d50ba82fd447607fe35",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/ETH_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/ETH_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        },
+        {
+          "file": "ETH/2022.json.gz",
+          "from": "2022-01-01T00:00:00.000Z",
+          "to": "2022-06-21T22:15:00.000Z",
+          "bars": 16506,
+          "sha256": "b7a94c2df467067c84cb08f584954949c78ae8b023ee5cf6f8da2ad71c42f710",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/ETH_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/ETH_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        },
+        {
+          "file": "ETH/2026.json.gz",
+          "from": "2026-03-04T00:00:00.000Z",
+          "to": "2026-05-09T00:00:00.000Z",
+          "bars": 6337,
+          "sha256": "fa0ea73cb62cc7ec913cfedbd0b31b94dbc4012106092872593eafbde1c6dcf6",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/ETH_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/ETH_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        }
+      ],
+      "coverage": [
+        {
+          "from": "2021-11-12T00:00:00.000Z",
+          "to": "2022-06-21T22:15:00.000Z"
+        },
+        {
+          "from": "2026-03-04T00:00:00.000Z",
+          "to": "2026-05-09T00:00:00.000Z"
+        }
+      ],
+      "gaps": [
+        {
+          "after": "2022-06-21T22:15:00.000Z",
+          "before": "2026-03-04T00:00:00.000Z",
+          "minutes": 1945545
+        }
+      ]
+    },
+    "LINK": {
+      "native": "PF_LINKUSD",
+      "chunks": [
+        {
+          "file": "LINK/2021.json.gz",
+          "from": "2021-11-12T00:00:00.000Z",
+          "to": "2021-12-31T23:45:00.000Z",
+          "bars": 4800,
+          "sha256": "00c1f7c30258caf600bab735ce416ed560a7949a2722f5f788e18e6f39f48c24",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/LINK_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/LINK_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        },
+        {
+          "file": "LINK/2022.json.gz",
+          "from": "2022-01-01T00:00:00.000Z",
+          "to": "2022-07-16T13:45:00.000Z",
+          "bars": 18872,
+          "sha256": "99da812b29baf83037e5698f086bfbda2f15c149762693fc7e1f7c089ebc73a0",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/LINK_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/LINK_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        },
+        {
+          "file": "LINK/2026.json.gz",
+          "from": "2026-03-04T00:00:00.000Z",
+          "to": "2026-05-09T00:00:00.000Z",
+          "bars": 6337,
+          "sha256": "73e7031a5db931c18e82a3ccdf82f8783c5769a9709954ad4f7ad3b39a925133",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/LINK_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/LINK_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        }
+      ],
+      "coverage": [
+        {
+          "from": "2021-11-12T00:00:00.000Z",
+          "to": "2022-07-16T13:45:00.000Z"
+        },
+        {
+          "from": "2026-03-04T00:00:00.000Z",
+          "to": "2026-05-09T00:00:00.000Z"
+        }
+      ],
+      "gaps": [
+        {
+          "after": "2022-07-16T13:45:00.000Z",
+          "before": "2026-03-04T00:00:00.000Z",
+          "minutes": 1910055
+        }
+      ]
+    },
+    "LTC": {
+      "native": "PF_LTCUSD",
+      "chunks": [
+        {
+          "file": "LTC/2026.json.gz",
+          "from": "2026-03-04T00:00:00.000Z",
+          "to": "2026-05-09T00:00:00.000Z",
+          "bars": 6337,
+          "sha256": "83a06e6496bcb43f9d6af9eb142c9f86f8cf17ee45642aeacbdcba865fd2baf1",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/LTC_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        }
+      ],
+      "coverage": [
+        {
+          "from": "2026-03-04T00:00:00.000Z",
+          "to": "2026-05-09T00:00:00.000Z"
+        }
+      ],
+      "gaps": []
+    },
+    "SOL": {
+      "native": "PF_SOLUSD",
+      "chunks": [
+        {
+          "file": "SOL/2021.json.gz",
+          "from": "2021-11-12T00:00:00.000Z",
+          "to": "2021-12-31T23:45:00.000Z",
+          "bars": 4800,
+          "sha256": "e771a73e7519a0bbdd88cae7c428e4ad9aaa23f2f22529ff0b204027168d7d1e",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/SOL_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/SOL_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        },
+        {
+          "file": "SOL/2022.json.gz",
+          "from": "2022-01-01T00:00:00.000Z",
+          "to": "2022-07-09T02:30:00.000Z",
+          "bars": 18155,
+          "sha256": "dd2a179e53f76912eac775ccb86362a26c7d0a4204c3a1318e4b2380b55d8252",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/SOL_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/SOL_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        },
+        {
+          "file": "SOL/2026.json.gz",
+          "from": "2026-03-04T00:00:00.000Z",
+          "to": "2026-05-09T00:00:00.000Z",
+          "bars": 6337,
+          "sha256": "8b1c372ec6825d50a41a0f8b9aa65e7c8a99fec56cacfad58e4a4ba3ec4d1400",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/SOL_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/SOL_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        }
+      ],
+      "coverage": [
+        {
+          "from": "2021-11-12T00:00:00.000Z",
+          "to": "2022-07-09T02:30:00.000Z"
+        },
+        {
+          "from": "2026-03-04T00:00:00.000Z",
+          "to": "2026-05-09T00:00:00.000Z"
+        }
+      ],
+      "gaps": [
+        {
+          "after": "2022-07-09T02:30:00.000Z",
+          "before": "2026-03-04T00:00:00.000Z",
+          "minutes": 1920810
+        }
+      ]
+    },
+    "XRP": {
+      "native": "PF_XRPUSD",
+      "chunks": [
+        {
+          "file": "XRP/2021.json.gz",
+          "from": "2021-11-12T00:00:00.000Z",
+          "to": "2021-12-31T23:45:00.000Z",
+          "bars": 4800,
+          "sha256": "f4741b374a16ab4347b2348023c170f3c94c51a70c633de81497cf5b135c99e2",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/XRP_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/XRP_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        },
+        {
+          "file": "XRP/2022.json.gz",
+          "from": "2022-01-01T00:00:00.000Z",
+          "to": "2022-07-05T08:00:00.000Z",
+          "bars": 17793,
+          "sha256": "74d251a29300aa2fc4f3ce94bf4f68c994c4024184eb5507c1f3192afdd46417",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/XRP_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/XRP_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        },
+        {
+          "file": "XRP/2026.json.gz",
+          "from": "2026-03-04T00:00:00.000Z",
+          "to": "2026-05-09T00:00:00.000Z",
+          "bars": 6337,
+          "sha256": "d672611d4fe8b6d6bcf40ff42c665cbd20c6220c01609cbf6fc3c21a3391116d",
+          "source": "legacy-cache-salvage: src/server/backtest/data_cache/XRP_USD_USD_15Min_KRAKEN_v2_2022-01-01_2026-05-09.json@83148b1 (troncato, prefisso recuperato) + src/server/backtest/data_cache/XRP_USD_USD_15Min_KRAKEN_v2_2026-04-23_2026-05-09.json@83148b1"
+        }
+      ],
+      "coverage": [
+        {
+          "from": "2021-11-12T00:00:00.000Z",
+          "to": "2022-07-05T08:00:00.000Z"
+        },
+        {
+          "from": "2026-03-04T00:00:00.000Z",
+          "to": "2026-05-09T00:00:00.000Z"
+        }
+      ],
+      "gaps": [
+        {
+          "after": "2022-07-05T08:00:00.000Z",
+          "before": "2026-03-04T00:00:00.000Z",
+          "minutes": 1926240
+        }
+      ]
+    }
+  }
+}

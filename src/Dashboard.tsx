@@ -1010,7 +1010,7 @@ export default function Dashboard() {
                       <div className="flex justify-between items-center w-full">
                          <span className="text-white/40 tracking-widest uppercase font-bold">Sharpe Ratio</span>
                          <span className="text-[#10B981] font-mono text-[11px] font-medium">
-                            {metrics?.t0?.sharpe?.toFixed(2) || '0.00'}
+                            {typeof metrics?.t0?.sharpe === 'number' ? metrics.t0.sharpe.toFixed(2) : 'N/A'}
                          </span>
                       </div>
                       <div className="flex justify-between items-center w-full">

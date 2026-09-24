@@ -1160,7 +1160,7 @@ async function runEventDrivenBacktest() {
 
   // --- INVARIANTS VALIDATION ---
   const normalTradesFinal = allTrades.filter(t => t.engine === "NORMAL");
-  const normalShorts = normalTradesFinal.filter(t => t.type === "SHORT" || t.direction === "SHORT");
+  const normalShorts = normalTradesFinal.filter(t => t.type === "SHORT" || (t as any).direction === "SHORT");
   const normalNonBull = normalTradesFinal.filter(t => t.entryRegime !== "BULL");
   const normalNonRsi2 = normalTradesFinal.filter(t => t.setup !== "RSI2_TREND_TRAILING");
   const normalNonTrailingExit = normalTradesFinal.filter(t => t.reason !== "TRAILING_STOP" && t.reason !== "END_OF_DATA");

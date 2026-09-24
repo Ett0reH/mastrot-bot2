@@ -1,0 +1,49 @@
+{
+  "datasetChunks": {
+    "ADA": [
+      "ADA/2026.json.gz:17b019c4cd429b3924218e3c9950adece69adedd9421093a60bb9390e339384d"
+    ],
+    "BTC": [
+      "BTC/2026.json.gz:aa9b97af1bf761df602a864cb61d0210d0864033ce0466c4ea52bb153f21fad6"
+    ],
+    "DOGE": [
+      "DOGE/2026.json.gz:f006bfca07fb3fa9f3ac8dadb5da0f69007ff451a4a7f15382bf4c3586c63426"
+    ],
+    "ETH": [
+      "ETH/2026.json.gz:fa0ea73cb62cc7ec913cfedbd0b31b94dbc4012106092872593eafbde1c6dcf6"
+    ],
+    "LINK": [
+      "LINK/2026.json.gz:73e7031a5db931c18e82a3ccdf82f8783c5769a9709954ad4f7ad3b39a925133"
+    ],
+    "LTC": [
+      "LTC/2026.json.gz:83a06e6496bcb43f9d6af9eb142c9f86f8cf17ee45642aeacbdcba865fd2baf1"
+    ],
+    "SOL": [
+      "SOL/2026.json.gz:8b1c372ec6825d50a41a0f8b9aa65e7c8a99fec56cacfad58e4a4ba3ec4d1400"
+    ],
+    "XRP": [
+      "XRP/2026.json.gz:d672611d4fe8b6d6bcf40ff42c665cbd20c6220c01609cbf6fc3c21a3391116d"
+    ]
+  },
+  "finalEquity": 10117.36754982702,
+  "netPnL": 117.36754982702041,
+  "tradeCount": 4,
+  "tradesSha256": "b008269348c989286aef7fe9a262df814556b020472d1aa89281ad502dc8f99e",
+  "winRate": 0.75,
+  "window": {
+    "end": "2026-05-08T23:45:00Z",
+    "id": "2026Q2",
+    "note": "Le cache brevi integre: manca AVAX, al suo posto LTC (unica cache breve disponibile).",
+    "start": "2026-04-23T00:00:00Z",
+    "symbols": [
+      "BTC",
+      "ETH",
+      "SOL",
+      "LTC",
+      "XRP",
+      "DOGE",
+      "LINK",
+      "ADA"
+    ]
+  }
+}

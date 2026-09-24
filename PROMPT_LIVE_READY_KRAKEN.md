@@ -117,7 +117,7 @@ UNKNOWN_POSITION_POLICY: alert_protect_no_manage   # posizione su Kraken sconosc
 - `summa-test.md`: le 5 macro-aree.
 - `trading_bot_audit_prompts_deterministici/00_GLOBAL_CONTEXT.md`: protocollo test-first e invarianti. Nota: la sua regola "non modificare codice di produzione" vale per gli audit. Qui la produzione si modifica, ma sempre test-first.
 
-**Solo storico** — I report `FASE*`, `debug_reports/` e `QA_REPORT.md` descrivono in parte bug già corretti: non sono una specifica.
+**Solo storico** — I report `FASE*`, `debug_reports/` e `QA_REPORT.md` (spostati in `archive/reports/` durante la F0) descrivono in parte bug già corretti: non sono una specifica.
 
 ---
 

@@ -28,3 +28,12 @@ Le logiche di uscita sono complesse e stratificate per preservare l'equità:
 - Creata la struttura di test in `summa-test.md` che divide l'architettura in 5 Macro-Aree fondamentali (Core Strategy, Risk Management, Trade Lifecycle, Live Engine, Persistence/UI). Tutte le future sessioni di test e analisi profonda dovranno far riferimento a queste macro-aree per isolare i comportamenti (es. Ghost Trades, coerenza UI, disallineamento Kraken).
 - *Fix TypeScript Environment:* Corrette le configurazioni di build mancanti e ripristinato il pacchetto dipendenze di base per l'ambiente Node/TypeScript in cui testiamo i fills.
 - *Integrazione Leva di FASE 10 confermata nel core e gestita correttamente.*
+
+## 6. Fasi del prompt PROMPT_LIVE_READY_KRAKEN.md
+
+### F0 — Fondamenta (completata, gate parziale)
+- **Dataset di riferimento:** `data/kraken-futures/15m/` (chunk annuali gzip < 2 MB con checksum SHA-256 nel `manifest.json`). Le vecchie cache in `src/server/backtest/data_cache/` erano troncate a ~2 MB dal sync di AI Studio. Sono state recuperate le parti integre (2021-11 → metà 2022; 2026-03 → 2026-05). Il dataset completo si ricostruisce con `npm run data:download`, che richiede rete verso futures.kraken.com. **Regola:** nessun file versionato deve superare i 2 MB.
+- **Golden backtest:** `golden/legacy/<finestra>/` (`npm run golden:check`). La finestra 2022H1 riproduce identici, in ogni campo, i trade del report di riferimento nello stesso periodo. Ogni refactor della logica deve lasciare il golden invariato. Le modifiche intenzionali richiedono un nuovo golden approvato.
+- **Test:** `npm test` (node:test via tsx, 85 test), `npm run typecheck` (legacy + strict per `src/engine`, `tests`, `scripts`).
+- **Codice nuovo:** va in `src/engine/` in TypeScript strict. `src/server/liveEngineUtils.ts` contiene le utility pure del live engine legacy.
+- **Materiale storico** spostato in `archive/`.

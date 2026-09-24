@@ -6,12 +6,21 @@
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "dev": "tsx server.ts",
-    "lint": "npx eslint ."
+    "lint": "npx eslint .",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.strict.json",
+    "test": "node scripts/run-tests.mjs",
+    "backtest": "tsx scripts/golden/legacyGolden.ts run",
+    "golden:check": "tsx scripts/golden/legacyGolden.ts check",
+    "golden:update": "tsx scripts/golden/legacyGolden.ts update",
+    "data:salvage": "tsx scripts/data/salvageLegacyCaches.ts",
+    "data:download": "tsx scripts/data/downloadKraken15m.ts",
+    "data:verify": "tsx scripts/data/verifyDataset.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",
     "@fontsource-variable/geist": "^5.2.8",
     "@google/genai": "^2.0.0",
+    "@siebly/kraken-api": "^1.0.5",
     "@tailwindcss/vite": "^4.2.4",
     "canvas-confetti": "^1.9.4",
     "ccxt": "^4.5.52",
@@ -31,7 +40,6 @@
   },
   "devDependencies": {
     "@firebase/eslint-plugin-security-rules": "^0.0.2",
-    "@siebly/kraken-api": "^1.0.5",
     "@types/canvas-confetti": "^1.9.0",
     "@types/express": "^5.0.6",
     "@types/node": "^20.11.25",

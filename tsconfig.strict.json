@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "types": ["node"]
+  },
+  "include": ["src/engine/**/*", "tests/**/*", "scripts/**/*"],
+  "exclude": ["node_modules", "dist", "archive", ".golden_tmp"]
+}
