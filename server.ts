@@ -3,302 +3,107 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import fs from "fs";
-import * as ccxt from "ccxt";
-import { GoogleGenAI, Type } from "@google/genai";
-import { startPaperTrading, stopPaperTrading, getLiveState, triggerCronTick, resetPaperTrading } from "./src/server/liveEngine.js";
+import { ConfigError, describeConfig } from "./src/engine/config/config";
+import { initRuntimeConfig } from "./src/engine/config/runtime";
+import { channelSink, FanoutAlertSink } from "./src/engine/ops/alertChannels";
+import { LogAlertSink, makeAlert } from "./src/engine/ops/alerts";
+import { configSecrets, CycleContext, Logger } from "./src/engine/ops/logger";
+import { createBotRuntime } from "./src/engine/runtime/factory";
+import { HeartbeatMonitor } from "./src/engine/runtime/heartbeat";
+import { RuntimeScheduler } from "./src/engine/runtime/scheduler";
+import { createApp } from "./src/server/app";
+import { createKrakenAdmin } from "./src/server/krakenAdmin";
+
+function loadConfigOrExit() {
+  try {
+    return initRuntimeConfig(process.env);
+  } catch (error) {
+    if (error instanceof ConfigError) {
+      console.error(error.message);
+      process.exit(1);
+    }
+    throw error;
+  }
+}
 
 async function startServer() {
-  const app = express();
+  // Configurazione validata prima di tutto: con una configurazione non valida il server non parte.
+  const { config, warnings } = loadConfigOrExit();
+  console.log(`[config]\n${describeConfig(config)}`);
+  for (const warning of warnings) console.warn(`[config] ATTENZIONE: ${warning}`);
+
+  // Log JSON con correlation id (F6); i segreti della configurazione non finiscono mai nei log.
+  const cycle = new CycleContext();
+  const logger = new Logger({ cycle, secrets: configSecrets(config) });
+  // Alert: sempre sul log, più il canale configurato (Telegram o webhook).
+  const channel = channelSink(config, () => Date.now());
+  const alerts = new FanoutAlertSink(
+    [
+      { name: "log", sink: new LogAlertSink((line) => console.log(line), { cycle, redact: (text) => logger.redact(text) }) },
+      ...(channel ? [channel] : []),
+    ],
+    logger,
+  );
+
+  // Runtime del bot (F4): in demo e live la persistenza è obbligatoria, altrimenti il server non parte.
+  let bundle;
+  try {
+    bundle = await createBotRuntime(config, alerts, logger, cycle);
+  } catch (error) {
+    logger.error(`[runtime] ${(error as Error).message}`);
+    process.exit(1);
+  }
+  const { runtime } = bundle;
+  const heartbeat = new HeartbeatMonitor(Date.now(), (level, code, message) => runtime.raiseAlert(level, code, message));
+  const scheduler = new RuntimeScheduler(runtime, undefined, { heartbeat });
+  logger.info(`runtime ${config.mode} avviato (istanza ${bundle.instanceId}, persistenza ${bundle.persistence}, alert ${channel?.name ?? "solo log"})`);
+  scheduler.start();
+  // Watchdog con un proprio timer: se lo scheduler si ferma, l'alert parte comunque.
+  const watchdog = setInterval(() => void heartbeat.check(Date.now()).catch((err) => logger.error(`watchdog: ${(err as Error).message}`)), 60_000);
+
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
-
-  app.use(express.json());
-
-  app.get("/api/debug-kraken", async (req, res) => {
-    try {
-      const { DerivativesClient } = await import('@siebly/kraken-api');
-      const apiKey = process.env.KRAKEN_API_KEY;
-      const secret = process.env.KRAKEN_SECRET_KEY;
-      
-      const client = new DerivativesClient({
-          apiKey: apiKey,
-          apiSecret: secret,
-          strictParamValidation: true,
-          testnet: process.env.KRAKEN_SANDBOX === 'true'
-      });
-      
-      const accounts = await client.getAccounts();
-      const positions = await client.getOpenPositions();
-      
-      res.json({
-         status: "success",
-         krakenSandbox: process.env.KRAKEN_SANDBOX,
-         keyConfigured: !!apiKey,
-         secretConfigured: !!secret,
-         accounts: accounts,
-         positions: positions
-      });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message, stack: error.stack, response: error?.response?.data || error?.body || error?.data || error });
-    }
-  });
-
-  // In-memory mock state for the bot
-  let systemState = {
-    session: "HEALTHY",
-    marketStream: "HEALTHY",
-    userStream: "HEALTHY",
-    driftMs: 12,
-    modelFreshnessMs: 400,
-    lastReconciliation: new Date(Date.now() - 5000).toISOString(),
-    regime: "NORMAL",
-    confidence: 0.85,
-    uncertainty: false,
-    equity: 10000.00,
-    cash: 0.00,
-    positions: 0,
-    orders: 0,
-    degradedModes: [],
-    errors: []
-  };
-
-  // API Routes
-  app.get("/api/health", (req, res) => {
-    res.json({ status: "ok" });
-  });
-
-  app.get("/api/firebase-status", (req, res) => {
-    const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
-    const exists = fs.existsSync(configPath);
-    let configData = null;
-    let parseError = null;
-    if (exists) {
-       try {
-         configData = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-       } catch(e: any) {
-         parseError = e.message;
-       }
-    }
-    
-    res.json({ 
-      cwd: process.cwd(),
-      configPath,
-      exists,
-      parseError,
-      hasProjectId: !!configData?.projectId
-    });
-  });
-
-  app.get("/api/system/state", (req, res) => {
-    res.json(systemState);
-  });
-
-  app.get("/api/system/backtest", (req, res) => {
-    try {
-      const data = fs.readFileSync(path.join(process.cwd(), 'backtest_report_latest.json'), 'utf8');
-      res.json(JSON.parse(data));
-    } catch (e) {
-      // Return 404 initially so the dashboard stays clean with 0 trades 
-      // and 10K equity until the user actually runs a training pipeline.
-      res.status(404).json({ error: "No backtest data yet" });
-    }
-  });
-
-  // Paper Trading Live Endpoints
-  app.get("/api/paper-trading/status", async (req, res) => {
-    try {
-      const state = await triggerCronTick(); // Driven by the dashboard polling
-      res.json(state);
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/paper-trading/start", async (req, res) => {
-    try {
-      const state = await startPaperTrading();
-      res.json(state);
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/paper-trading/stop", async (req, res) => {
-    try {
-      const state = await stopPaperTrading();
-      res.json(state);
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/paper-trading/reset", async (req, res) => {
-    try {
-      const state = await resetPaperTrading();
-      res.json(state);
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/emergency-kraken-transfer", async (req, res) => {
-    try {
-      const exchange = new ccxt.krakenfutures({
-        apiKey: process.env.KRAKEN_API_KEY,
-        secret: process.env.KRAKEN_SECRET_KEY,
-        enableRateLimit: true
-      });
-      if (process.env.KRAKEN_SANDBOX === 'true' || process.env.KRAKEN_SANDBOX === undefined) {
-        exchange.setSandboxMode(true);
-      }
-      await exchange.loadMarkets();
-      
-      const logs: string[] = [];
-      logs.push("Starting Emergency Close & Transfer...");
-
-      // 1. Close all open positions on Kraken Futures
+  const app = createApp({
+    config,
+    engine: {
+      status: async () => runtime.statusPayload(),
+      start: async () => {
+        await runtime.resume();
+        return runtime.statusPayload();
+      },
+      stop: async () => {
+        await runtime.pause();
+        return runtime.statusPayload();
+      },
+      reset: async () => {
+        await runtime.reset();
+        return runtime.statusPayload();
+      },
+      cronTick: async () => {
+        const beat = await heartbeat.check(Date.now());
+        return { isActive: runtime.statusPayload().isActive === true, healthy: beat.healthy, issues: beat.issues, lastProtectionAt: beat.lastProtectionAt, lastDecisionAt: beat.lastDecisionAt };
+      },
+      health: async () => runtime.health(await heartbeat.check(Date.now())),
+      testAlert: async () => {
+        if (!channel) throw new Error("ALERT_CHANNEL=none: nessun canale da provare (gli alert vanno solo nel log)");
+        const alert = makeAlert(Date.now(), "info", "TEST", `Alert di prova (${config.mode}) delle ${new Date().toISOString()}`);
+        await channel.sink.send(alert);
+        return { sent: true, channel: channel.name, at: alert.at };
+      },
+      dailyReports: async (limit) => runtime.dailyReports(limit),
+      dailyReport: async (day) => runtime.dailyReport(day),
+      killSwitch: async (source) => runtime.killSwitch(source),
+      resumeRisk: async (confirmation) => ({ operationalState: await runtime.resumeRisk(confirmation) }),
+    },
+    krakenAdmin: createKrakenAdmin(config),
+    logError: (message, error) => logger.error(`${message}: ${error instanceof Error ? error.message : String(error)}`),
+    readBacktestReport: () => {
       try {
-          const pos = await exchange.fetchPositions();
-          logs.push(`Found ${pos.length} position objects.`);
-          for (const p of pos) {
-              if (Math.abs(p.contracts || 0) > 0) {
-                  const side = p.contracts > 0 ? 'sell' : 'buy';
-                  logs.push(`Closing orphaned position: ${p.symbol} (${p.contracts}) with ${side}...`);
-                  await exchange.createMarketOrder(p.symbol, side, Math.abs(p.contracts), undefined, { reduceOnly: true });
-                  logs.push(`Successfully closed ${p.symbol}.`);
-              }
-          }
-      } catch (err: any) {
-          logs.push(`Position closing error: ${err.message}`);
+        return JSON.parse(fs.readFileSync(path.join(process.cwd(), "backtest_report_latest.json"), "utf8"));
+      } catch {
+        return null;
       }
-
-      // 2. Transfer all balances to Holding (cash) 
-      try {
-          logs.push('Fetching account balances...');
-          const response = await exchange.privateGetAccounts();
-          const accounts = response.accounts;
-      
-          for (const accName of Object.keys(accounts)) {
-            const acc = accounts[accName];
-            const type = acc.type;
-            
-            const balances = acc.balances || acc.currencies || {};
-            for (const cur of Object.keys(balances)) {
-              let amount = 0;
-              if (type === 'marginAccount') {
-                 amount = parseFloat(balances[cur] || '0');
-              } else if (type === 'multiCollateralMarginAccount') {
-                 amount = parseFloat(balances[cur].available || balances[cur].quantity || '0');
-              } else if (type === 'cashAccount') {
-                 continue; // already in holding
-              }
-      
-              if (amount > 0) {
-                logs.push(`Found ${amount} ${cur} in ${type} (${accName}). Processing transfer...`);
-                try {
-                   let fromAccount = '';
-                   if (type === 'marginAccount') {
-                       fromAccount = accName; 
-                   } else if (type === 'multiCollateralMarginAccount') {
-                       fromAccount = 'flex';
-                   }
-      
-                   if (fromAccount) {
-                       let code = String(cur).toUpperCase();
-                       if (code === 'XBT') code = 'BTC';
-
-                       await exchange.transfer(code, amount, fromAccount, 'cash');
-                       logs.push(`SUCCESS: Transferred ${amount} ${code} to Holding Wallet.`);
-                   }
-                } catch(e: any) {
-                   logs.push(`ERROR transferring ${cur}: ${e.message}`);
-                }
-              }
-            }
-          }
-      } catch (err: any) {
-          logs.push(`Transfer error: ${err.message}`);
-      }
-      
-      logs.push("Emergency process complete.");
-      res.json({ success: true, logs });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
+    },
   });
-
-  // Cron Trigger Endpoint - Used by cron-job.org to keep the bot executing
-  // even when CPU goes into sleep mode in serverless environments.
-  app.get("/api/cron/tick", async (req, res) => {
-    try {
-      const state = await triggerCronTick();
-      res.json({ message: "Cron triggered successfully", isActive: state.isActive });
-    } catch (error: any) {
-      console.error("CRON TICK ERROR:", error);
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // Serve static datasets
-  app.use("/api/data", express.static(path.join(process.cwd(), "src/server/backtest/data_cache")));
-
-  // Gemini proxy
-  app.post("/api/generate", async (req, res) => {
-    try {
-      let apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey || apiKey === "undefined" || apiKey.trim() === "") {
-        console.error("SDK Error: Missing GEMINI_API_KEY in environment");
-        return res.status(500).json({ error: "Missing GEMINI_API_KEY. Please ensure your API key is correctly applied in the platform settings." });
-      }
-
-      // Sanitize the key in case it contains accidental quotes from platform settings
-      apiKey = apiKey.replace(/^["']|["']$/g, '').trim();
-
-      const ai = new GoogleGenAI({ apiKey });
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: req.body.prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              folds: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    action: { type: Type.STRING, enum: ["LONG", "SHORT", "NEUTRAL"], description: "Trade action" },
-                    reasoning: { type: Type.STRING, description: "Why taking this action" },
-                    newStrategicLearning: { type: Type.STRING, description: "Updated rule for the next fold" }
-                  },
-                  required: ["action", "reasoning"]
-                }
-              }
-            },
-            required: ["folds"]
-          }
-        }
-      });
-      res.json({ text: response.text });
-    } catch (e: any) {
-      console.error("SDK Error on Server:", e);
-      res.status(500).json({ error: e.message || "Failed to generate" });
-    }
-  });
-
-  // Mock toggle degraded mode to show UI response
-  app.post("/api/admin/toggle-degraded", (req, res) => {
-    if (systemState.degradedModes.length > 0) {
-      systemState.degradedModes = [];
-      systemState.session = "HEALTHY";
-    } else {
-      systemState.degradedModes = ["DEGRADED_DATA"];
-      systemState.session = "DEGRADED_DATA";
-    }
-    res.json(systemState);
-  });
-
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
@@ -316,9 +121,20 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+
+  // Arresto ordinato (deploy): stop dei cicli, stato salvato, lease rilasciato.
+  const shutdown = async (signal: string) => {
+    logger.info(`${signal}: arresto del runtime`);
+    clearInterval(watchdog);
+    scheduler.stop();
+    await runtime.stop().catch((err) => logger.error(`arresto: ${(err as Error).message}`));
+    server.close(() => process.exit(0));
+  };
+  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+  process.once("SIGINT", () => void shutdown("SIGINT"));
 }
 
 startServer();

@@ -6,3 +6,11 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Artefatti temporanei di test e golden run
+.golden_tmp/
+integrity_report.log
+*.tsbuildinfo
+
+# Cache locali del backtest legacy (il dataset di riferimento è in data/kraken-futures)
+src/server/backtest/data_cache/

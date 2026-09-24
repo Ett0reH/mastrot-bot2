@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck (legacy + strict)
+        run: npm run typecheck
+      - name: Test (inclusi dataset e golden backtest)
+        run: npm test
+      - name: Verifica dataset
+        run: npm run data:verify
+      - name: Build
+        run: npm run build
