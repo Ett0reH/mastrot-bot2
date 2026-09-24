@@ -42,3 +42,12 @@ Le logiche di uscita sono complesse e stratificate per preservare l'equità:
 - **Modalità:** `TRADING_MODE` = shadow (default, nessun ordine) | demo (Kraken demo-futures) | live (richiede conferma esplicita, tutti i limiti, alert e `ADMIN_TOKEN`). La configurazione è validata all'avvio in `src/engine/config/config.ts`: se non è valida il server non parte. Nessun altro punto del codice decide ambiente o chiavi Kraken.
 - **API:** le API di controllo richiedono `ADMIN_TOKEN`; `/api/cron/tick` richiede `CRON_TOKEN`. La dashboard usa `src/lib/api.ts`.
 - **Firestore:** solo lato server (Admin SDK); le regole negano ogni accesso ai client. Nessun segreto nel codice: `tests/security/secrets.test.ts` lo verifica.
+
+### F2 — DecisionCore unico e parità backtest ↔ live (completata; golden del motore da approvare)
+- **Un solo codice decisionale:** `src/engine/core/decisionCore.ts` riunisce `architecture.ts` (invariato) e la logica che esisteva solo nel backtest (tier di rischio con blocco TRANSITION, cooldown NORMAL, invalidazione per buco dati, sizing sull'equity). È puro: niente I/O, niente `Date.now()`, tempo e candele arrivano da fuori. Produce intenti `OPEN` / `CLOSE` / `UPDATE_STOP` e un journal con il motivo di ogni decisione.
+- **Stato persistibile** (`CoreState`, JSON): equity, posizioni, statistiche NORMAL per i tier, cooldown NORMAL (tempo UTC dell'ultimo blocco 4H chiuso all'uscita, non un contatore: sopravvive ai riavvii), intenti pendenti.
+- **Dati:** candele 15m aggregate in 1H/4H a bucket UTC (`aggregator.ts`); feature sempre sulle ultime 250 candele; griglia di slot UTC comune a tutti i simboli.
+- **Esecuzione:** slippage, fee, funding e backstop nativo (3% oltre lo stop della strategia, simulato sulle candele 15m) sono nel modello di esecuzione (`src/engine/sim/simExchange.ts`), non nel core. Stop e trailing della strategia si valutano solo alla chiusura 1H.
+- **Live:** `src/engine/live/decisionCycle.ts` usa il core con una `CandleSource` e una `ExecutionPort`. Il replay (`src/engine/replay/replay.ts`) prova che produce le stesse decisioni del backtest (`npm run replay:parity`). Il vecchio `loopTick` resta attivo fino alla F4.
+- **Golden:** `golden/legacy/` resta la prova che la strategia non è cambiata; `golden/engine/` fissa il modello realistico (da approvare). `npm run golden:check` li verifica entrambi.
+

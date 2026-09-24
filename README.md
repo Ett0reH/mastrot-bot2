@@ -25,8 +25,11 @@ La dashboard chiede l'`ADMIN_TOKEN` al primo accesso e lo salva nel browser.
 |---|---|
 | `npm test` | Test automatici (node:test), inclusi dataset e golden backtest |
 | `npm run typecheck` | Typecheck del codice legacy e di quello strict (`src/engine`, `tests`, `scripts`) |
-| `npm run backtest` | Backtest legacy sulle finestre del golden |
-| `npm run golden:check` | Confronta il backtest con il golden versionato |
+| `npm run backtest` | Backtest del motore unico (DecisionCore) con il modello di esecuzione realistico; `-- --profile legacy`, `--window <id>`, `--full`, `--funding constant` |
+| `npm run backtest:legacy` | Backtest legacy (`run_kraken.ts`) sulle finestre del golden |
+| `npm run backtest:compare` | Modello legacy vs realistico e stress sui costi (report in `docs/phase_reports/`) |
+| `npm run replay:parity` | Parità backtest ↔ percorso live in replay (orologio ed exchange simulati) |
+| `npm run golden:check` | Confronta legacy e nuovo motore con i golden versionati (`golden/legacy`, `golden/engine`) |
 | `npm run data:verify` | Verifica checksum e integrità del dataset |
 | `npm run data:download` | Ricostruisce il dataset completo da Kraken (serve rete verso futures.kraken.com) |
 | `npm run build` / `npm start` | Build di produzione e avvio |
