@@ -4,8 +4,11 @@ import type { ActiveTrade, ExitReason, TradingRegime } from '../../server/core/a
 export type Direction = 'LONG' | 'SHORT';
 export type EngineName = 'EXTREME' | 'NORMAL' | 'NONE';
 
-/** Uscita decisa dal core (legacy) oppure eseguita dal backstop nativo sull'exchange. */
-export type CloseReason = ExitReason | 'BACKSTOP';
+/**
+ * Uscita decisa dal core (legacy) oppure avvenuta sull'exchange: backstop nativo, chiusura
+ * esterna (manuale), liquidazione, chiusura d'emergenza per protezione mancante (I7).
+ */
+export type CloseReason = ExitReason | 'BACKSTOP' | 'EXTERNAL_CLOSE' | 'LIQUIDATION' | 'PROTECTION_FAILURE';
 
 /** Posizione gestita dal core. `trade` è la struttura valutata da PositionExitLayer. */
 export interface CorePosition {
@@ -82,13 +85,15 @@ export interface Fill {
   time: number;
   exitType?: CloseReason;
   source: 'sim' | 'exchange';
+  /** true se la fee è stimata (la fee reale arriva dal ledger di Kraken, F4). */
+  feeEstimated?: boolean;
 }
 
 /** Voce del journal delle decisioni: anche i segnali neutrali o bloccati, con il motivo. */
 export interface DecisionRecord {
   slotTime: number;
   symbol: string;
-  action: 'NO_SIGNAL' | 'COOLDOWN' | 'BLOCKED' | 'TIER_BLOCKED' | 'SIZE_ZERO' | 'OPEN' | 'CLOSE' | 'HOLD' | 'HALTED';
+  action: 'NO_SIGNAL' | 'COOLDOWN' | 'BLOCKED' | 'TIER_BLOCKED' | 'SIZE_ZERO' | 'OPEN' | 'CLOSE' | 'HOLD' | 'HALTED' | 'PENDING_ORDER';
   reason: string;
   direction?: Direction | 'NEUTRAL';
   regime?: TradingRegime;

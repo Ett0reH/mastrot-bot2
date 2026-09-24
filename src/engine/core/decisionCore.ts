@@ -320,6 +320,11 @@ export class DecisionCore {
       const pos = this.state.positions[symbol];
       const snap = snapshots[symbol];
       if (!pos || !snap) continue;
+      // Uscita già decisa e in attesa di esito dall'exchange (solo live): non si ridecide.
+      if (this.state.pendingCloses[pos.id]) {
+        journal.push({ slotTime, symbol, action: 'PENDING_ORDER', reason: 'uscita in attesa di esito', direction: pos.trade.direction as Direction, regime: snap.regime, price: snap.features.price, engine: pos.trade.engine });
+        continue;
+      }
       const trade = cloneTrade(pos.trade);
       let decision: { shouldExit: boolean; exitType: string } = PositionExitLayer.monitorAndExit(trade, snap.features, snap.regime);
       if (isFinalSlot) decision = { shouldExit: true, exitType: 'END_OF_DATA' };
@@ -370,10 +375,16 @@ export class DecisionCore {
     const { grossProfit, grossLoss } = this.state.normalClean;
     const cleanProfitFactor = grossLoss === 0 ? 1.0 : grossProfit / Math.abs(grossLoss);
     const opens: OpenIntent[] = [];
+    const pendingOpenSymbols = new Set(Object.values(this.state.pendingOpens).map((o) => o.symbol));
     for (const symbol of this.config.symbols) {
       const snapshot = snapshots[symbol];
       if (!snapshot || !capital) continue;
       if (this.state.positions[symbol] && !closing.has(symbol)) continue;
+      // Ingresso precedente in attesa di esito (solo live): al massimo una posizione per simbolo (I6).
+      if (pendingOpenSymbols.has(symbol)) {
+        journal.push({ slotTime, symbol, action: 'PENDING_ORDER', reason: 'ingresso precedente in attesa di esito', regime: snapshot.regime, price: snapshot.features.price });
+        continue;
+      }
       const decision = decideEntry({
         slotTime,
         symbol,

@@ -39,11 +39,12 @@ export interface ExecutionReport {
 
 export interface ExecutionPort {
   /**
-   * Stop nativi eseguiti dall'exchange durante lo slot, da applicare prima che il core elabori lo
-   * slot. `candles` sono le candele dello slot: servono agli exchange simulati; quello reale le
-   * ignora e legge i fill da Kraken.
+   * Eventi avvenuti sull'exchange fuori da `execute`, da applicare prima che il core elabori lo
+   * slot: stop nativi scattati, chiusure esterne, intenti rimasti in sospeso (ordini con esito
+   * incerto) risolti dalla riconciliazione. `candles` sono le candele dello slot: servono agli
+   * exchange simulati; quello reale le ignora e legge lo stato da Kraken.
    */
-  protectiveFills(slotTime: number, candles: Readonly<Record<string, Candle | undefined>>): Promise<Fill[]>;
+  settle(slotTime: number, candles: Readonly<Record<string, Candle | undefined>>): Promise<ExecutionReport>;
   /** Funding dell'ora che si chiude con lo slot `hourCloseSlot`. */
   funding(hourCloseSlot: number, positions: readonly FundingPosition[]): Promise<FundingCharge[]>;
   /** Esegue gli intenti di una chiusura oraria. Un intento né eseguito né rifiutato resta pendente. */

@@ -11,7 +11,7 @@
 // uscite, direzione, size, leva, livelli di stop), stesso journal, stessi trade, stessa equity.
 import { type BacktestConfig, type BacktestResult, finalHourCloseSlot, fundingRateAt, type FundingModel, loadBacktestData } from '../backtest/runner';
 import { HOUR_MS, slotEnd } from '../core/aggregator';
-import type { DecisionRecord, Fill, Intent, TradeRecord } from '../core/types';
+import type { DecisionRecord, Intent, TradeRecord } from '../core/types';
 import { BAR_15M_MS, type Candle } from '../data/dataset';
 import { type CycleEvent, DecisionCycle, type DecisionCycleConfig, LIVE_CYCLE_DEFAULTS } from '../live/decisionCycle';
 import type { CandleSource, ExecutionPort, ExecutionReport, FundingCharge, FundingPosition } from '../live/ports';
@@ -72,8 +72,8 @@ export class SimExecutionPort implements ExecutionPort {
     this.exchange = new SimExchange(model);
   }
 
-  async protectiveFills(slotTime: number, candles: Readonly<Record<string, Candle | undefined>>): Promise<Fill[]> {
-    return this.exchange.onCandles(slotTime, candles);
+  async settle(slotTime: number, candles: Readonly<Record<string, Candle | undefined>>): Promise<ExecutionReport> {
+    return { fills: this.exchange.onCandles(slotTime, candles), rejected: [] };
   }
 
   async funding(hourCloseSlot: number, positions: readonly FundingPosition[]): Promise<FundingCharge[]> {

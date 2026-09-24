@@ -15,7 +15,7 @@ import { BAR_15M_MS, type Candle } from '../data/dataset';
 import { isHourCloseSlot, slotEnd } from '../core/aggregator';
 import { type CoreConfig, type CoreState, DecisionCore, validateCoreState } from '../core/decisionCore';
 import type { DecisionRecord, Fill, Intent, TradeRecord } from '../core/types';
-import type { CandleSource, ExecutionPort, FundingPosition } from './ports';
+import type { CandleSource, ExecutionPort, ExecutionReport, FundingPosition } from './ports';
 
 export interface DecisionCycleConfig {
   core: CoreConfig;
@@ -154,6 +154,14 @@ export class DecisionCycle {
     }
   }
 
+  private applyReport(slot: number, report: ExecutionReport, result: TickResult): void {
+    this.applyFills(report.fills, result.trades);
+    for (const rejection of report.rejected) {
+      this.core.rejectIntent(rejection.positionId);
+      result.events.push({ type: 'INTENT_REJECTED', slot, positionId: rejection.positionId, reason: rejection.reason });
+    }
+  }
+
   async tick(now: number): Promise<TickResult> {
     if (!this.started) throw new Error('DecisionCycle non avviato: chiamare start()');
     const result: TickResult = { processedSlots: 0, waiting: false, lastSlot: this.core.state.lastSlot, intents: [], journal: [], trades: [], events: [] };
@@ -179,7 +187,7 @@ export class DecisionCycle {
         this.core.processSlot(slot, candles, { warmupOnly: true });
         continue;
       }
-      this.applyFills(await this.deps.port.protectiveFills(slot, candles), result.trades);
+      this.applyReport(slot, await this.deps.port.settle(slot, candles), result);
       if (isHourCloseSlot(slot)) {
         for (const charge of await this.deps.port.funding(slot, this.fundingPositions(candles))) this.core.applyFunding(charge.symbol, charge.amount);
       }
@@ -198,12 +206,7 @@ export class DecisionCycle {
         }
         toExecute.push(intent);
       }
-      const report = await this.deps.port.execute(toExecute);
-      this.applyFills(report.fills, result.trades);
-      for (const rejection of report.rejected) {
-        this.core.rejectIntent(rejection.positionId);
-        result.events.push({ type: 'INTENT_REJECTED', slot, positionId: rejection.positionId, reason: rejection.reason });
-      }
+      this.applyReport(slot, await this.deps.port.execute(toExecute), result);
       for (const id of [...Object.keys(this.core.state.pendingOpens), ...Object.keys(this.core.state.pendingCloses)]) {
         result.events.push({ type: 'INTENT_PENDING', slot, positionId: id });
       }

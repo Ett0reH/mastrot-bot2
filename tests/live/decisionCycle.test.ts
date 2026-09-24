@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { REALISTIC_PROFILE } from '../../src/engine/backtest/profiles';
 import { loadBacktestData } from '../../src/engine/backtest/runner';
 import { initialCoreState } from '../../src/engine/core/decisionCore';
-import type { Fill, Intent } from '../../src/engine/core/types';
+import type { Intent } from '../../src/engine/core/types';
 import { BAR_15M_MS, type Candle } from '../../src/engine/data/dataset';
 import { DecisionCycle, type DecisionCycleConfig, lastClosedSlot } from '../../src/engine/live/decisionCycle';
 import type { ExecutionPort, ExecutionReport, FundingCharge } from '../../src/engine/live/ports';
@@ -130,7 +130,7 @@ test('uscita decisa in ritardo: viene eseguita comunque (riduce il rischio)', as
 test('intento rifiutato dall exchange: il core lo annulla e lo segnala', async () => {
   const { clock, source } = setup();
   const rejecting: ExecutionPort = {
-    protectiveFills: async (): Promise<Fill[]> => [],
+    settle: async (): Promise<ExecutionReport> => ({ fills: [], rejected: [] }),
     funding: async (): Promise<FundingCharge[]> => [],
     execute: async (intents: readonly Intent[]): Promise<ExecutionReport> => ({ fills: [], rejected: intents.filter((i) => i.kind !== 'UPDATE_STOP').map((i) => ({ positionId: i.positionId, reason: 'insufficient margin' })) }),
   };
@@ -146,7 +146,7 @@ test('intento rifiutato dall exchange: il core lo annulla e lo segnala', async (
 test('intento senza esito (ordine in stato sconosciuto): resta pendente nello stato persistito', async () => {
   const { clock, source } = setup();
   const silent: ExecutionPort = {
-    protectiveFills: async () => [],
+    settle: async () => ({ fills: [], rejected: [] }),
     funding: async () => [],
     execute: async () => ({ fills: [], rejected: [] }),
   };
@@ -202,4 +202,55 @@ test('tick prima di start e start ripetuto sono errori', async () => {
   await assert.rejects(() => cycle.tick(START), /non avviato/);
   await cycle.start();
   await assert.rejects(() => cycle.start(), /già avviato/);
+});
+
+test('I6: con un ingresso in attesa di esito il core non apre un secondo ingresso sullo stesso simbolo', async () => {
+  const { clock, source } = setup();
+  const silent: ExecutionPort = {
+    settle: async () => ({ fills: [], rejected: [] }),
+    funding: async () => [],
+    execute: async () => ({ fills: [], rejected: [] }),
+  };
+  const cycle = new DecisionCycle(cycleConfig(), { source, port: silent });
+  await cycle.start();
+  const opens: string[] = [];
+  for (let t = HOUR_END + MIN; t < HOUR_END + 24 * 3_600_000; t += 60 * MIN) {
+    clock.now = t;
+    const r = await cycle.tick(t);
+    opens.push(...r.intents.filter((i) => i.kind === 'OPEN').map((i) => i.symbol));
+  }
+  const counts = opens.reduce<Record<string, number>>((acc, s) => ({ ...acc, [s]: (acc[s] ?? 0) + 1 }), {});
+  for (const [symbol, n] of Object.entries(counts)) assert.equal(n, 1, `${symbol}: ${n} ingressi con il primo ancora in sospeso`);
+  assert.ok(opens.includes('SOL'));
+});
+
+test('una chiusura in attesa di esito non viene ridecisa (effetti provvisori applicati una volta sola)', async () => {
+  const { clock, source, port } = setup();
+  let holdCloses = false;
+  const wrapped: ExecutionPort = {
+    settle: (slot, candles) => port.settle(slot, candles),
+    funding: (slot, positions) => port.funding(slot, positions),
+    execute: async (intents) => (holdCloses ? port.execute(intents.filter((i) => i.kind !== 'CLOSE')) : port.execute(intents)),
+  };
+  const cycle = new DecisionCycle(cycleConfig(), { source, port: wrapped });
+  await cycle.start();
+  clock.now = HOUR_END + MIN;
+  await cycle.tick(clock.now);
+  assert.ok(cycle.state.positions.SOL);
+  holdCloses = true;
+  const closes: string[] = [];
+  const trades: { symbol: string; reason: string }[] = [];
+  for (let t = HOUR_END + 61 * MIN; t < HOUR_END + 24 * 3_600_000; t += 60 * MIN) {
+    clock.now = t;
+    const r = await cycle.tick(t);
+    closes.push(...r.intents.filter((i) => i.kind === 'CLOSE').map((i) => i.positionId));
+    trades.push(...r.trades);
+  }
+  const solCloses = closes.filter((id) => id.startsWith('SOL-'));
+  assert.equal(solCloses.length, 1, `chiusure SOL decise: ${solCloses.length}`);
+  // La chiusura non è mai stata eseguita: resta pendente, oppure la posizione è stata chiusa
+  // dal backstop nativo (fill dell'exchange, che riconcilia gli effetti provvisori).
+  const solTrade = trades.find((t) => t.symbol === 'SOL/USD:USD');
+  if (solTrade) assert.equal(solTrade.reason, 'BACKSTOP');
+  else assert.ok(cycle.state.pendingCloses[solCloses[0]], 'resta pendente finché l exchange non risponde');
 });
