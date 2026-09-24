@@ -1,5 +1,5 @@
-// Configurazione caricata una sola volta dal processo, per il codice legacy (liveEngine.ts)
-// che non riceve la configurazione per parametro. Il codice nuovo la riceve esplicitamente.
+// Configurazione caricata una sola volta dal processo (server). Il codice del motore la riceve
+// esplicitamente; qui restano gli helper che traducono la modalità in opzioni del client Kraken.
 import { type EngineConfig, loadConfig } from './config';
 
 let current: EngineConfig | null = null;

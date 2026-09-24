@@ -1,0 +1,45 @@
+# Cloud Run: UNA sola istanza, sempre attiva, CPU sempre allocata (F4, HOSTING=single_instance).
+# Anche durante un deploy (due revisioni per qualche secondo) può operare solo l'istanza che
+# detiene il lease su Firestore: l'altra resta in STANDBY e non invia ordini.
+#
+#   gcloud run services replace deploy/cloudrun-service.yaml --region <regione>
+#
+# Sostituire IMAGE e SERVICE_ACCOUNT. Segreti (chiavi Kraken, token, credenziali) da Secret
+# Manager: mai valori in chiaro in questo file.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: mastrot-bot
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "1"
+        run.googleapis.com/cpu-throttling: "false"
+        run.googleapis.com/startup-cpu-boost: "true"
+    spec:
+      serviceAccountName: SERVICE_ACCOUNT # ruolo Cloud Datastore User su Firestore
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      containers:
+        - image: IMAGE
+          ports:
+            - containerPort: 3000
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          env:
+            - name: TRADING_MODE
+              value: shadow
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mastrot-admin-token
+                  key: latest
+            - name: CRON_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mastrot-cron-token
+                  key: latest

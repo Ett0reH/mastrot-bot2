@@ -20,7 +20,7 @@ export interface ExecutionModel {
 
 export const LEGACY_EXECUTION: ExecutionModel = { feeRate: 0.0005, slippageBps: 0, simulateBackstop: false };
 
-interface RestingStop {
+export interface RestingStop {
   positionId: string;
   symbol: string;
   direction: Direction;
@@ -31,7 +31,14 @@ interface RestingStop {
 export class SimExchange {
   private readonly stops = new Map<string, RestingStop>();
 
-  constructor(readonly model: ExecutionModel) {}
+  constructor(readonly model: ExecutionModel, restingStops: readonly RestingStop[] = []) {
+    for (const s of restingStops) this.stops.set(s.positionId, { ...s });
+  }
+
+  /** Stop a riposo, serializzabili (lo shadow li persiste tra un riavvio e l'altro). */
+  snapshot(): RestingStop[] {
+    return [...this.stops.values()].map((s) => ({ ...s }));
+  }
 
   private slip(price: number, side: 'buy' | 'sell'): number {
     const s = this.model.slippageBps / 10_000;

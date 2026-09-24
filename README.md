@@ -17,6 +17,15 @@ npm run dev             # http://localhost:3000
 
 Senza configurazione il bot parte in modalità **shadow**: usa dati di mercato reali, simula i fill e non invia ordini. Le modalità `demo` e `live` e i relativi requisiti sono descritti in `.env.example`. Il server non parte se la configurazione non è valida.
 
+## Come gira il bot
+
+Il server avvia il runtime (`src/engine/runtime/`) con uno scheduler interno: il ciclo decisionale gira a ogni fine slot di 15 minuti (decisioni alla chiusura 1H UTC, come il backtest), il ciclo di protezione ogni 20 secondi (riconciliazione con Kraken, verifica degli stop). Le richieste HTTP leggono solo lo stato; il cron esterno (`/api/cron/tick`) è un heartbeat.
+
+- **Persistenza:** Firestore (stato, ordini, trade, decisioni, equity, ledger). Obbligatoria in demo e live; in shadow, se manca, lo stato resta in memoria.
+- **Una sola istanza opera:** lease su Firestore. Un'istanza senza lease resta in STANDBY e non invia ordini.
+- **Riavvio:** carica lo stato, prende il lease, riconcilia con Kraken, verifica gli stop e riprende.
+- **Deploy:** una sola istanza sempre attiva (`deploy/cloudrun-service.yaml`: Cloud Run con min=max=1 e CPU sempre allocata) oppure una VPS con il `Dockerfile`.
+
 La dashboard chiede l'`ADMIN_TOKEN` al primo accesso e lo salva nel browser.
 
 ## Comandi

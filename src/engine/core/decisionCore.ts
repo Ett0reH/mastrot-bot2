@@ -87,6 +87,11 @@ export interface CoreState {
   lastClose: Record<string, number>;
   lastSlot: number | null;
   capital: { trueEquity: number; isHalted: boolean; capacityMultiplier: number } | null;
+  /**
+   * Tetto dell'equity usata per il sizing (live: collateral del conto di trading, D28). null nel
+   * backtest e nel replay. Non tocca drawdown né massimo storico: limita solo la size.
+   */
+  sizingEquityCap: number | null;
   /** Intenti emessi e non ancora eseguiti né rifiutati: fanno parte dello stato persistito. */
   pendingOpens: Record<string, OpenIntent>;
   pendingCloses: Record<string, PendingClose>;
@@ -130,6 +135,7 @@ export function initialCoreState(config: CoreConfig): CoreState {
     lastClose: {},
     lastSlot: null,
     capital: null,
+    sizingEquityCap: null,
     pendingOpens: {},
     pendingCloses: {},
   };
@@ -137,7 +143,7 @@ export function initialCoreState(config: CoreConfig): CoreState {
 
 const STATE_KEYS: (keyof CoreState)[] = [
   'realizedEquity', 'maxHistoricalEquity', 'maxDrawdown', 'positions', 'lastExit4HStart', 'normalClean',
-  'lastGapMinutes', 'lastClose', 'lastSlot', 'capital', 'pendingOpens', 'pendingCloses',
+  'lastGapMinutes', 'lastClose', 'lastSlot', 'capital', 'sizingEquityCap', 'pendingOpens', 'pendingCloses',
 ];
 
 /** Verifica la forma di uno stato persistito prima di usarlo: uno stato incompleto non si "ripara". */
@@ -368,7 +374,8 @@ export class DecisionCore {
     }
 
     // 2. Ingressi
-    const capital = this.state.capital;
+    const cap = this.state.sizingEquityCap;
+    const capital = this.state.capital && cap !== null ? { ...this.state.capital, trueEquity: Math.min(this.state.capital.trueEquity, cap) } : this.state.capital;
     const btc = snapshots[this.btcSymbol];
     // Senza la candela di BTC in quest'ora: trend 0 e regime UNKNOWN, come nel backtest legacy.
     const btcContext = { trend1H: btc ? btc.features.trend1H : 0, regime: (btc ? btc.regime : 'UNKNOWN') as TradingRegime };

@@ -15,7 +15,7 @@ import type { DecisionRecord, Intent, TradeRecord } from '../core/types';
 import { BAR_15M_MS, type Candle } from '../data/dataset';
 import { type CycleEvent, DecisionCycle, type DecisionCycleConfig, LIVE_CYCLE_DEFAULTS } from '../live/decisionCycle';
 import type { CandleSource, ExecutionPort, ExecutionReport, FundingCharge, FundingPosition } from '../live/ports';
-import { type ExecutionModel, SimExchange } from '../sim/simExchange';
+import { type ExecutionModel, type RestingStop, SimExchange } from '../sim/simExchange';
 import { canonicalStringify } from '../util/canonical';
 import { hash32, mulberry32 } from '../util/prng';
 
@@ -68,8 +68,12 @@ export class SimExecutionPort implements ExecutionPort {
   readonly exchange: SimExchange;
   executed = 0;
 
-  constructor(model: ExecutionModel, private readonly fundingModel: FundingModel) {
-    this.exchange = new SimExchange(model);
+  constructor(model: ExecutionModel, private readonly fundingModel: FundingModel, state: { stops: RestingStop[] } = { stops: [] }) {
+    this.exchange = new SimExchange(model, state.stops);
+  }
+
+  snapshot(): { stops: RestingStop[] } {
+    return { stops: this.exchange.snapshot() };
   }
 
   async settle(slotTime: number, candles: Readonly<Record<string, Candle | undefined>>): Promise<ExecutionReport> {

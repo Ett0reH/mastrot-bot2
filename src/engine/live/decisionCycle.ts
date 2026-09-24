@@ -14,7 +14,7 @@
 import { BAR_15M_MS, type Candle } from '../data/dataset';
 import { isHourCloseSlot, slotEnd } from '../core/aggregator';
 import { type CoreConfig, type CoreState, DecisionCore, validateCoreState } from '../core/decisionCore';
-import type { DecisionRecord, Fill, Intent, TradeRecord } from '../core/types';
+import type { DecisionRecord, EquitySnapshot, Fill, Intent, TradeRecord } from '../core/types';
 import type { CandleSource, ExecutionPort, ExecutionReport, FundingPosition } from './ports';
 
 export interface DecisionCycleConfig {
@@ -44,7 +44,9 @@ export type CycleEvent =
   | { type: 'CANDLE_DISCARDED'; symbol: string; t: number; reason: 'NOT_CLOSED' | 'OUT_OF_RANGE' | 'MISALIGNED' | 'DUPLICATE' }
   | { type: 'STALE_ENTRY_REJECTED'; slot: number; positionId: string; delayMs: number }
   | { type: 'INTENT_REJECTED'; slot: number; positionId: string; reason: string }
-  | { type: 'INTENT_PENDING'; slot: number; positionId: string };
+  | { type: 'INTENT_PENDING'; slot: number; positionId: string }
+  | { type: 'CHECKPOINT_FAILED'; slot: number; reason: string }
+  | { type: 'ENTRY_BLOCKED'; slot: number; positionId: string; reason: string };
 
 export interface TickResult {
   processedSlots: number;
@@ -55,11 +57,18 @@ export interface TickResult {
   journal: DecisionRecord[];
   trades: TradeRecord[];
   events: CycleEvent[];
+  /** Equity alle chiusure orarie elaborate in questo tick. */
+  equity: EquitySnapshot[];
 }
 
 export interface DecisionCycleDeps {
   source: CandleSource;
   port: ExecutionPort;
+  /**
+   * Salvataggio dello stato PRIMA di inviare ingressi e uscite (write-ahead): dopo un crash il
+   * recovery trova gli intenti già decisi. Se fallisce, gli ingressi non partono (le uscite sì).
+   */
+  checkpoint?: () => Promise<void>;
 }
 
 /** Ultimo slot 15m la cui candela è chiusa al tempo `now`. */
@@ -164,7 +173,7 @@ export class DecisionCycle {
 
   async tick(now: number): Promise<TickResult> {
     if (!this.started) throw new Error('DecisionCycle non avviato: chiamare start()');
-    const result: TickResult = { processedSlots: 0, waiting: false, lastSlot: this.core.state.lastSlot, intents: [], journal: [], trades: [], events: [] };
+    const result: TickResult = { processedSlots: 0, waiting: false, lastSlot: this.core.state.lastSlot, intents: [], journal: [], trades: [], events: [], equity: [] };
     let latest = lastClosedSlot(now);
     if (this.config.finalSlot !== undefined) latest = Math.min(latest, this.config.finalSlot);
     const first = this.nextSlot();
@@ -193,6 +202,7 @@ export class DecisionCycle {
       }
       const slotResult = this.core.processSlot(slot, candles, { isFinalSlot: slot === this.config.finalSlot });
       result.journal.push(...slotResult.journal);
+      if (slotResult.hourClose && slotResult.equity) result.equity.push(slotResult.equity);
       if (slotResult.intents.length === 0) continue;
       result.intents.push(...structuredClone(slotResult.intents));
 
@@ -206,6 +216,19 @@ export class DecisionCycle {
         }
         toExecute.push(intent);
       }
+      if (this.deps.checkpoint && toExecute.some((i) => i.kind !== 'UPDATE_STOP')) {
+        try {
+          await this.deps.checkpoint();
+        } catch (err) {
+          const reason = `salvataggio dello stato fallito: ${(err as Error).message}`;
+          result.events.push({ type: 'CHECKPOINT_FAILED', slot, reason });
+          for (const intent of toExecute.filter((i) => i.kind === 'OPEN')) {
+            this.core.rejectIntent(intent.positionId);
+            result.events.push({ type: 'ENTRY_BLOCKED', slot, positionId: intent.positionId, reason });
+          }
+          toExecute.splice(0, toExecute.length, ...toExecute.filter((i) => i.kind !== 'OPEN'));
+        }
+      }
       this.applyReport(slot, await this.deps.port.execute(toExecute), result);
       for (const id of [...Object.keys(this.core.state.pendingOpens), ...Object.keys(this.core.state.pendingCloses)]) {
         result.events.push({ type: 'INTENT_PENDING', slot, positionId: id });
@@ -217,5 +240,10 @@ export class DecisionCycle {
 
   openPositions() {
     return this.core.openPositions();
+  }
+
+  /** Annulla un intento rimasto in sospeso (recovery: ordine mai inviato). */
+  rejectPending(positionId: string): void {
+    this.core.rejectIntent(positionId);
   }
 }

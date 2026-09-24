@@ -10,11 +10,15 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import type { EngineConfig } from '../engine/config/config';
 
 export interface EngineControlApi {
-  /** Stato del motore (il motore legacy esegue anche un tick: verrà eliminato in F4). */
+  /** Stato del runtime: solo lettura, nessuna logica eseguita (D24). */
   status(): Promise<unknown>;
+  /** Riprende gli ingressi. */
   start(): Promise<unknown>;
+  /** Pausa: nessun nuovo ingresso; uscite e stop nativi restano attivi. */
   stop(): Promise<unknown>;
+  /** Solo shadow: stato nuovo. */
   reset(): Promise<unknown>;
+  /** Heartbeat per il cron esterno: verifica che il processo sia vivo, non esegue logica. */
   cronTick(): Promise<{ isActive: boolean }>;
 }
 
@@ -151,10 +155,10 @@ export function createApp(deps: AppDeps): express.Express {
     return { success: true, logs };
   }));
 
-  // --- Cron (token dedicato) ---
+  // --- Cron (token dedicato): solo heartbeat, il motore gira con il proprio scheduler (D24) ---
   app.get('/api/cron/tick', requireCron, run('cron-tick', async () => {
     const state = await deps.engine.cronTick();
-    return { message: 'Cron triggered successfully', isActive: state.isActive };
+    return { message: 'heartbeat', ...state };
   }));
 
   // Rotte /api sconosciute: 404 JSON (non la pagina della SPA).

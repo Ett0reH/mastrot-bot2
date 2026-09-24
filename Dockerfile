@@ -1,26 +1,18 @@
-# Start with a Node 20 image (or whatever version you prefer, 18+ is good)
-FROM node:20-alpine
+# Immagine del bot: un solo processo (server + runtime). Deploy su Cloud Run con min=max=1
+# istanze e CPU sempre allocata (deploy/cloudrun-service.yaml) oppure su una VPS con Docker.
+FROM node:22-alpine
 
-# Set the working directory inside the container
 WORKDIR /app
 
-# Copy the package package.json to install dependencies first
-# We copy these first to leverage Docker layer caching
-COPY package.json package-lock.json* ./
+COPY package.json package-lock.json ./
+RUN npm ci
 
-# Install dependencies
-RUN npm install
-
-# Copy the rest of the application code
 COPY . .
-
-# Build the React frontend
 RUN npm run build
 
-# Expose the port the server listens on
+ENV NODE_ENV=production
 EXPOSE 3000
 
-# Start the application using your dev/start script
-# Since we updated the start script to run the server, this is perfect
-ENV NODE_ENV=production
-CMD ["npm", "start"]
+# node direttamente (non npm): il SIGTERM dei deploy arriva al server, che ferma i cicli,
+# salva lo stato e rilascia il lease, così la nuova revisione subentra subito.
+CMD ["node", "dist/server.cjs"]

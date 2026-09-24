@@ -58,3 +58,10 @@ Le logiche di uscita sono complesse e stratificate per preservare l'equità:
 - **Protezione:** ogni posizione ha uno stop `stp` reduceOnly sul mark price al livello del backstop del core, verificato dopo ogni modifica; se non si riesce a proteggerla, chiusura d'emergenza reduceOnly. La leva è impostata isolated e riletta prima dell'ingresso.
 - **Porta live:** `KrakenExecutionPort` esegue gli intenti del DecisionCycle (ingresso IOC con buffer, uscita a mercato reduceOnly) e, nel ciclo di protezione, riconcilia con Kraken: chiusure esterne attribuite dai fill, posizioni sconosciute solo protette (mai gestite). In shadow non si può costruire.
 - **Core:** con un intento in attesa di esito il core non ridecide né apre un secondo ingresso sullo stesso simbolo.
+
+### F4 — Runtime, persistenza e recovery (completata)
+- **Il loopTick legacy non esiste più** (`archive/legacy_engine/`). Il server avvia `BotRuntime` con uno scheduler interno: decisione a ogni fine slot 15m (+45 s), protezione ogni 20 s. HTTP e cron leggono solo lo stato.
+- **Persistenza (Firestore, solo server):** `bot_runtime/state` (core, porta, runtime), `orders/`, `trades/`, `decisions/` (retention 30 giorni), `equity/`, `ledger/`. Scritture solo su modifica, contate per giorno (budget `FIRESTORE_DAILY_WRITE_BUDGET`). Obbligatoria in demo e live.
+- **Lease d'istanza:** `bot_runtime/lease` con epoch; senza lease nessuna scrittura verso Kraken. Durante un deploy o con due istanze opera solo chi ha il lease.
+- **Recovery:** stato → lease → intenti in sospeso riallineati con gli ordini → riconciliazione con Kraken → stop verificati → ripresa. Lo stato si salva prima di eseguire ingressi e uscite (write-ahead).
+- **Equity (D28):** equity del bot = CAPITAL_CAP_USD + PnL del bot, mai azzerata; il sizing è limitato dal collateral del conto; depositi e prelievi dall'account log sono registrati e segnalati, non cambiano l'equity del bot. Il reset esiste solo in shadow.
