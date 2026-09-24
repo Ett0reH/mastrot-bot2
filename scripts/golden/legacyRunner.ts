@@ -49,6 +49,8 @@ export interface LegacyRunOptions {
   datasetRoot?: string;
   workDir?: string;
   timeoutMs?: number;
+  /** Fuso del processo legacy (default UTC). Solo per misurare l'effetto di D07. */
+  tz?: string;
 }
 
 export function runLegacyBacktest(window: GoldenWindow, options: LegacyRunOptions = {}): LegacyRunResult {
@@ -70,17 +72,15 @@ export function runLegacyBacktest(window: GoldenWindow, options: LegacyRunOption
     // Stesso formato delle vecchie cache: t in ISO, valori numerici invariati.
     const legacy = candles.map((c) => ({ t: new Date(c.t).toISOString(), o: c.o, h: c.h, l: c.l, c: c.c, v: c.v }));
     writeFileSync(join(cacheDir, `${symbol}_USD_USD_15Min_KRAKEN_v2_${startDay}_${endDay}.json`), JSON.stringify(legacy));
-    datasetChunks[symbol] = (manifest.symbols[symbol]?.chunks ?? [])
-      .filter((c) => Date.parse(c.to) >= startMs - WARMUP_MS && Date.parse(c.from) <= endMs)
-      .map((c) => `${c.file}:${c.sha256}`);
   }
+  Object.assign(datasetChunks, datasetChunksFor(manifest, window.symbols, startMs - WARMUP_MS, endMs));
 
   const patched = join(workDir, 'run_kraken_patched.ts');
   writeFileSync(patched, patchLegacySource(readFileSync(LEGACY_SOURCE, 'utf8'), window));
   const logFile = join(workDir, 'run.log');
   const child = spawnSync(process.execPath, ['--import', 'tsx', patched], {
     cwd: workDir,
-    env: { ...process.env, TZ: 'UTC', NODE_ENV: 'test' },
+    env: { ...process.env, TZ: options.tz ?? 'UTC', NODE_ENV: 'test' },
     encoding: 'utf8',
     maxBuffer: 512 * 1024 * 1024,
     timeout: options.timeoutMs ?? 15 * 60 * 1000,
@@ -109,6 +109,17 @@ export function runLegacyBacktest(window: GoldenWindow, options: LegacyRunOption
     datasetChunks,
     logFile,
   };
+}
+
+/** Chunk del dataset (file e SHA-256) usati da una finestra: legano il golden ai dati. */
+export function datasetChunksFor(manifest: ReturnType<typeof readManifest>, symbols: string[], fromMs: number, toMs: number): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const symbol of symbols) {
+    const chunks = manifest.symbols[symbol]?.chunks;
+    if (!chunks) throw new Error(`Simbolo ${symbol} assente dal manifest del dataset`);
+    out[symbol] = chunks.filter((c) => Date.parse(c.to) >= fromMs && Date.parse(c.from) <= toMs).map((c) => `${c.file}:${c.sha256}`);
+  }
+  return out;
 }
 
 export function goldenDir(windowId: string): string {

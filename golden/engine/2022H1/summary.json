@@ -1,0 +1,71 @@
+{
+  "datasetChunks": {
+    "ADA": [
+      "ADA/2021.json.gz:142f8bdc827dadfa2dbe4815d014f201519b0a84c5b2a01e85efc951f9350587",
+      "ADA/2022.json.gz:86cdfc79421589b51705f086fc2f4118c2550c421c00758b0fe0872be8e44f0e"
+    ],
+    "AVAX": [
+      "AVAX/2021.json.gz:61e61ef3e83a72145b9f1febcff7491ffd8d3c38f3ec35b9ae68102390e0b86b",
+      "AVAX/2022.json.gz:16fd50796d05a58efddf138f1ef205c103d9261143441e4f4ddeebbef37901fb"
+    ],
+    "BTC": [
+      "BTC/2021.json.gz:fca7501b1bf619d201d67e52bf063ee8f2107fb361b3505e7f3d28ca1659c25d",
+      "BTC/2022.json.gz:89ae129223a3e9c9a0b1850286491af1e8bd1196bbdae150b0ef24054a6383d8"
+    ],
+    "DOGE": [
+      "DOGE/2021.json.gz:df2c439e3dc14fb6e55681fb15678d6e5ece71d975f84e76f51d2e55ede6ade0",
+      "DOGE/2022.json.gz:9f0bb2dc928979310fbede5392ae67f7cc03084152b50a9f681128b4eacbe324"
+    ],
+    "ETH": [
+      "ETH/2021.json.gz:1b03652c062c1efd30eb687830fa25be162647712cb08d50ba82fd447607fe35",
+      "ETH/2022.json.gz:b7a94c2df467067c84cb08f584954949c78ae8b023ee5cf6f8da2ad71c42f710"
+    ],
+    "LINK": [
+      "LINK/2021.json.gz:00c1f7c30258caf600bab735ce416ed560a7949a2722f5f788e18e6f39f48c24",
+      "LINK/2022.json.gz:99da812b29baf83037e5698f086bfbda2f15c149762693fc7e1f7c089ebc73a0"
+    ],
+    "SOL": [
+      "SOL/2021.json.gz:e771a73e7519a0bbdd88cae7c428e4ad9aaa23f2f22529ff0b204027168d7d1e",
+      "SOL/2022.json.gz:dd2a179e53f76912eac775ccb86362a26c7d0a4204c3a1318e4b2380b55d8252"
+    ],
+    "XRP": [
+      "XRP/2021.json.gz:f4741b374a16ab4347b2348023c170f3c94c51a70c633de81497cf5b135c99e2",
+      "XRP/2022.json.gz:74d251a29300aa2fc4f3ce94bf4f68c994c4024184eb5507c1f3192afdd46417"
+    ]
+  },
+  "finalEquity": 10230.01150461959,
+  "maxDrawdown": 0.0568698022749174,
+  "netPnL": 230.0115046195897,
+  "profile": {
+    "backstop": {
+      "bufferPct": 3,
+      "model": "close_based_plus_native_backstop"
+    },
+    "execution": {
+      "feeRate": 0.0005,
+      "simulateBackstop": true,
+      "slippageBps": 5
+    },
+    "funding": "none",
+    "id": "realistic"
+  },
+  "profitFactor": 1.2519709983891454,
+  "tradeCount": 52,
+  "tradesSha256": "f79f7cc1548a64a2accdaafee0d896e409f846e07543ea2a1bd43d0b818d4b76",
+  "window": {
+    "end": "2022-06-12T23:45:00Z",
+    "id": "2022H1",
+    "note": "Stessi 8 simboli del backtest di riferimento; include i crolli di gennaio e maggio 2022.",
+    "start": "2022-01-01T00:00:00Z",
+    "symbols": [
+      "BTC",
+      "ETH",
+      "SOL",
+      "AVAX",
+      "XRP",
+      "DOGE",
+      "LINK",
+      "ADA"
+    ]
+  }
+}
