@@ -51,3 +51,10 @@ Le logiche di uscita sono complesse e stratificate per preservare l'equità:
 - **Live:** `src/engine/live/decisionCycle.ts` usa il core con una `CandleSource` e una `ExecutionPort`. Il replay (`src/engine/replay/replay.ts`) prova che produce le stesse decisioni del backtest (`npm run replay:parity`). Il vecchio `loopTick` resta attivo fino alla F4.
 - **Golden:** `golden/legacy/` resta la prova che la strategia non è cambiata; `golden/engine/` fissa il modello realistico (da approvare). `npm run golden:check` li verifica entrambi.
 
+
+### F3 — Execution layer Kraken (completata; smoke test in demo da eseguire)
+- **Un solo adapter:** `src/engine/exchange/krakenAdapter.ts` (siebly `DerivativesClient`). Letture con retry e backoff; scritture a tentativo singolo (un retry cieco può duplicare un ordine); rate limiter a costi e circuit breaker; stop e chiusure d'emergenza passano anche col circuito aperto. Tick, passo della size e massimi dei contratti si leggono da `getInstruments`.
+- **Ordini idempotenti:** ogni ordine ha un cliOrdId deterministico, salvato prima dell'invio, e un `processBefore`. Un esito incerto è UNKNOWN finché la riconciliazione non lo chiarisce; un nuovo tentativo è ammesso solo per un ordine dimostrato senza effetti.
+- **Protezione:** ogni posizione ha uno stop `stp` reduceOnly sul mark price al livello del backstop del core, verificato dopo ogni modifica; se non si riesce a proteggerla, chiusura d'emergenza reduceOnly. La leva è impostata isolated e riletta prima dell'ingresso.
+- **Porta live:** `KrakenExecutionPort` esegue gli intenti del DecisionCycle (ingresso IOC con buffer, uscita a mercato reduceOnly) e, nel ciclo di protezione, riconcilia con Kraken: chiusure esterne attribuite dai fill, posizioni sconosciute solo protette (mai gestite). In shadow non si può costruire.
+- **Core:** con un intento in attesa di esito il core non ridecide né apre un secondo ingresso sullo stesso simbolo.

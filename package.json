@@ -14,6 +14,7 @@
     "backtest:compare": "tsx scripts/backtest/compare.ts",
     "backtest:fixes": "tsx scripts/backtest/legacyFixes.ts",
     "replay:parity": "tsx scripts/replay/parity.ts",
+    "kraken:demo-smoke": "tsx scripts/kraken/demoSmoke.ts",
     "golden:check": "tsx scripts/golden/legacyGolden.ts check && tsx scripts/golden/engineGolden.ts check",
     "golden:update": "tsx scripts/golden/legacyGolden.ts update",
     "golden:engine:update": "tsx scripts/golden/engineGolden.ts update",

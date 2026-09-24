@@ -1,96 +1,100 @@
-// Operazioni amministrative su Kraken (debug dei conti, chiusura d'emergenza + trasferimento
-// al wallet cash), spostate da server.ts. Ambiente e chiavi arrivano SOLO dalla configurazione
-// (TRADING_MODE): niente più default di sandbox divergenti tra percorsi (D02).
-// Queste funzioni verranno sostituite dal kill switch e dall'adapter unico (F3/F5).
-import { DerivativesClient } from '@siebly/kraken-api';
-import * as ccxt from 'ccxt';
+// Operazioni amministrative su Kraken: debug dei conti e chiusura d'emergenza con trasferimento
+// al wallet cash. Ambiente e chiavi arrivano SOLO dalla configurazione (D02) e tutto passa
+// dall'adapter unico (F3, D33): niente più ccxt, ogni ordine ha un cliOrdId (D18).
+// La chiusura d'emergenza: cancella gli ordini aperti, chiude ogni posizione reduceOnly, verifica
+// che il conto sia flat e SOLO ALLORA trasferisce i fondi (togliere margine a una posizione
+// ancora aperta potrebbe farla liquidare). Il kill switch completo arriva in F5.
+import type { FuturesAccounts } from '@siebly/kraken-api';
 import type { EngineConfig } from '../engine/config/config';
-import { krakenClientOptions } from '../engine/config/runtime';
+import { createKrakenFuturesApi, type KrakenFuturesApi } from '../engine/exchange/krakenApi';
+import { KrakenAdapter } from '../engine/exchange/krakenAdapter';
+import { OrderManager } from '../engine/exchange/orderManager';
+import { InMemoryOrderStore, type OrderStore } from '../engine/exchange/orders';
 import type { KrakenAdminApi } from './app';
 
-function requireCredentials(config: EngineConfig) {
+export interface KrakenAdminDeps {
+  api?: KrakenFuturesApi;
+  store?: OrderStore;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+function requireCredentials(config: EngineConfig): void {
   if (!config.ordersEnabled || !config.kraken.credentials) {
     throw new Error('Operazione Kraken non disponibile senza credenziali (modalità shadow)');
   }
-  return config.kraken.credentials;
 }
 
-export function createKrakenAdmin(config: EngineConfig): KrakenAdminApi {
+/** Saldi trasferibili al wallet cash: conto flex (multi-collateral) e conti margin single-collateral. */
+export function transferableBalances(accounts: FuturesAccounts): { fromAccount: string; unit: string; amount: number }[] {
+  const out: { fromAccount: string; unit: string; amount: number }[] = [];
+  for (const [name, account] of Object.entries(accounts)) {
+    if (!account) continue;
+    if (account.type === 'multiCollateralMarginAccount') {
+      for (const [unit, c] of Object.entries(account.currencies)) if (c.quantity > 0) out.push({ fromAccount: 'flex', unit, amount: c.quantity });
+    } else if (account.type === 'marginAccount') {
+      for (const [unit, value] of Object.entries(account.balances)) {
+        const amount = Number(value);
+        if (Number.isFinite(amount) && amount > 0) out.push({ fromAccount: name, unit, amount });
+      }
+    }
+  }
+  return out;
+}
+
+export function createKrakenAdmin(config: EngineConfig, deps: KrakenAdminDeps = {}): KrakenAdminApi {
+  const now = deps.now ?? Date.now;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const build = () => {
+    const adapter = new KrakenAdapter(deps.api ?? createKrakenFuturesApi(config), { now, sleep });
+    const orders = new OrderManager(adapter, deps.store ?? new InMemoryOrderStore(), { now, processWindowMs: 5_000, graceMs: 2_000 });
+    return { adapter, orders };
+  };
+
   return {
     async debugAccounts() {
       requireCredentials(config);
-      const client = new DerivativesClient(krakenClientOptions(config));
-      const accounts = await client.getAccounts();
-      const positions = await client.getOpenPositions();
-      return { mode: config.mode, environment: config.kraken.tradingEnvironment, accounts, positions };
+      const { adapter } = build();
+      return { mode: config.mode, environment: config.kraken.tradingEnvironment, accounts: await adapter.accounts(), positions: await adapter.openPositions() };
     },
 
     async emergencyCloseAndTransfer() {
-      const creds = requireCredentials(config);
-      const exchange = new ccxt.krakenfutures({ apiKey: creds.apiKey, secret: creds.apiSecret, enableRateLimit: true });
-      if (config.kraken.tradingEnvironment === 'demo') exchange.setSandboxMode(true);
-      await exchange.loadMarkets();
+      requireCredentials(config);
+      const { adapter, orders } = build();
+      const runId = new Date(now()).toISOString();
+      const logs: string[] = [`Chiusura d'emergenza (${config.mode}, ${runId})`];
 
-      const logs: string[] = [`Starting Emergency Close & Transfer (${config.mode})...`];
+      const cancel = await adapter.cancelAllOrders(undefined, 'protective');
+      logs.push(cancel.outcome === 'ok' ? `Ordini cancellati: ${cancel.value.cancelledOrders.length}` : `Cancellazione degli ordini fallita: ${cancel.error.message}`);
 
-      // 1. Close all open positions on Kraken Futures
-      try {
-        const pos = await exchange.fetchPositions();
-        logs.push(`Found ${pos.length} position objects.`);
-        for (const p of pos) {
-          const contracts = p.contracts ?? 0;
-          if (Math.abs(contracts) > 0) {
-            const side = contracts > 0 ? 'sell' : 'buy';
-            logs.push(`Closing orphaned position: ${p.symbol} (${contracts}) with ${side}...`);
-            await exchange.createMarketOrder(p.symbol, side, Math.abs(contracts), undefined, { reduceOnly: true });
-            logs.push(`Successfully closed ${p.symbol}.`);
-          }
-        }
-      } catch (err) {
-        logs.push(`Position closing error: ${(err as Error).message}`);
+      const positions = await adapter.openPositions('protective');
+      logs.push(`Posizioni aperte: ${positions.length}`);
+      for (const p of positions) {
+        const record = await orders.submit(
+          { intentKey: `emergency-${runId}-${p.symbol}`, purpose: 'EMERGENCY_CLOSE', symbol: p.symbol, side: p.side === 'long' ? 'sell' : 'buy', orderType: 'mkt', size: p.size, reduceOnly: true },
+          1,
+          'protective',
+        );
+        logs.push(`${p.symbol}: chiusura ${record.cliOrdId} → ${record.state}${record.lastError ? ` (${record.lastError})` : ''}`);
+      }
+      // Gli esiti incerti si risolvono dopo processBefore: si attende e si riconcilia.
+      for (let i = 0; i < 5 && (await orders.store.active()).length > 0; i++) {
+        await sleep(3_000);
+        for (const r of await orders.reconcileAll('protective')) logs.push(`${r.symbol}: riconciliato ${r.cliOrdId} → ${r.state}`);
       }
 
-      // 2. Transfer all balances to Holding (cash)
-      try {
-        logs.push('Fetching account balances...');
-        const response = await (exchange as any).privateGetAccounts();
-        const accounts = response.accounts;
-        for (const accName of Object.keys(accounts)) {
-          const acc = accounts[accName];
-          const type = acc.type;
-          const balances = acc.balances || acc.currencies || {};
-          for (const cur of Object.keys(balances)) {
-            let amount = 0;
-            if (type === 'marginAccount') {
-              amount = parseFloat(balances[cur] || '0');
-            } else if (type === 'multiCollateralMarginAccount') {
-              amount = parseFloat(balances[cur].available || balances[cur].quantity || '0');
-            } else if (type === 'cashAccount') {
-              continue; // already in holding
-            }
-            if (amount > 0) {
-              logs.push(`Found ${amount} ${cur} in ${type} (${accName}). Processing transfer...`);
-              try {
-                let fromAccount = '';
-                if (type === 'marginAccount') fromAccount = accName;
-                else if (type === 'multiCollateralMarginAccount') fromAccount = 'flex';
-                if (fromAccount) {
-                  let code = String(cur).toUpperCase();
-                  if (code === 'XBT') code = 'BTC';
-                  await exchange.transfer(code, amount, fromAccount, 'cash');
-                  logs.push(`SUCCESS: Transferred ${amount} ${code} to Holding Wallet.`);
-                }
-              } catch (e) {
-                logs.push(`ERROR transferring ${cur}: ${(e as Error).message}`);
-              }
-            }
-          }
-        }
-      } catch (err) {
-        logs.push(`Transfer error: ${(err as Error).message}`);
+      const remaining = await adapter.openPositions('protective');
+      if (remaining.length > 0) {
+        logs.push(`ATTENZIONE: il conto NON è flat (${remaining.map((p) => `${p.symbol} ${p.side} ${p.size}`).join(', ')}): trasferimento annullato`);
+        return { logs };
       }
+      logs.push('Conto flat verificato.');
 
-      logs.push('Emergency process complete.');
+      for (const t of transferableBalances(await adapter.accounts())) {
+        const res = await adapter.walletTransfer({ fromAccount: t.fromAccount, toAccount: 'cash', unit: t.unit, amount: t.amount });
+        logs.push(res.outcome === 'ok' ? `Trasferiti ${t.amount} ${t.unit} da ${t.fromAccount} al wallet cash` : `Trasferimento di ${t.unit} fallito: ${res.error.message}`);
+      }
+      logs.push('Procedura completata.');
       return { logs };
     },
   };
