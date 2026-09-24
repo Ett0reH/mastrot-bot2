@@ -8,7 +8,7 @@
 import type { SetupExpectancyMatrix } from '../../server/core/architecture';
 import { BAR_15M_MS, type Candle, defaultDatasetRoot, loadCandles } from '../data/dataset';
 import { HOUR_MS, isHourCloseSlot } from '../core/aggregator';
-import { type BackstopModel, DecisionCore } from '../core/decisionCore';
+import { type BackstopModel, DecisionCore, type SlotResult } from '../core/decisionCore';
 import type { DecisionRecord, Intent, TradeRecord } from '../core/types';
 import { type ExecutionModel, SimExchange } from '../sim/simExchange';
 
@@ -41,6 +41,8 @@ export interface BacktestConfig {
    * griglia). Il live dopo un riavvio scarica solo gli ultimi giorni: il risultato non deve cambiare.
    */
   resumeWarmupDays?: number;
+  /** Osservatore di sola lettura chiamato dopo ogni slot (audit dei guardrail): non cambia nulla. */
+  audit?: (slot: number, result: SlotResult, core: DecisionCore) => void;
 }
 
 export interface EquityPoint {
@@ -145,6 +147,7 @@ export function runBacktest(config: BacktestConfig, data: Record<string, Candle[
     }
     // 3. Decisioni ed esecuzione
     const result = core.processSlot(slot, candles, { isFinalSlot: slot === finalSlot });
+    config.audit?.(slot, result, core);
     if (config.collectJournal) {
       journal.push(...result.journal);
       intents.push(...structuredClone(result.intents));

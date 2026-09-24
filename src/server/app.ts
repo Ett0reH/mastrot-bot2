@@ -20,6 +20,10 @@ export interface EngineControlApi {
   reset(): Promise<unknown>;
   /** Heartbeat per il cron esterno: verifica che il processo sia vivo, non esegue logica. */
   cronTick(): Promise<{ isActive: boolean }>;
+  /** Kill switch (F5): chiude tutto, verifica il conto flat, ferma il bot. Idempotente. */
+  killSwitch(source: string): Promise<unknown>;
+  /** Ripresa da REDUCE_ONLY o HALTED con la frase di conferma. */
+  resumeRisk(confirmation: string): Promise<unknown>;
 }
 
 export interface KrakenAdminApi {
@@ -147,6 +151,10 @@ export function createApp(deps: AppDeps): express.Express {
   app.post('/api/paper-trading/start', requireAdmin, run('start', () => deps.engine.start()));
   app.post('/api/paper-trading/stop', requireAdmin, run('stop', () => deps.engine.stop()));
   app.post('/api/paper-trading/reset', requireAdmin, run('reset', () => deps.engine.reset()));
+
+  // --- Guardrail (F5): kill switch e ripresa manuale ---
+  app.post('/api/kill-switch', requireAdmin, run('kill-switch', () => deps.engine.killSwitch('api')));
+  app.post('/api/risk/resume', requireAdmin, run('risk-resume', (req) => deps.engine.resumeRisk(typeof req.body?.confirm === 'string' ? req.body.confirm : '')));
 
   // --- Kraken (admin, solo con ordini abilitati) ---
   app.get('/api/debug-kraken', requireAdmin, requireOrdersEnabled, run('debug-kraken', () => deps.krakenAdmin.debugAccounts()));

@@ -19,6 +19,8 @@ export type AlertCode =
   | 'KILL_SWITCH'
   | 'HEARTBEAT_MISSING'
   | 'RISK_REJECTED'
+  /** Limite di rischio superato: perdita giornaliera (blocco ingressi) o drawdown (REDUCE_ONLY). */
+  | 'RISK_LIMIT'
   | 'MODE_CHANGE'
   | 'ACCOUNT_TRANSFER';
 

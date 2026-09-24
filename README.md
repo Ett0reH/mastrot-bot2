@@ -28,6 +28,13 @@ Il server avvia il runtime (`src/engine/runtime/`) con uno scheduler interno: il
 
 La dashboard chiede l'`ADMIN_TOKEN` al primo accesso e lo salva nel browser.
 
+## Guardrail e kill switch
+
+- **Limiti** (`.env.example`): ogni ingresso passa dal RiskGuard prima dell'invio (leva isolated su Kraken, nozionale, numero di posizioni, margine entro l'equity del bot e il collateral). Un ingresso respinto non genera ordini: finisce nel journal (`REJECTED`, con il motivo) e negli alert.
+- **Perdita giornaliera** oltre `MAX_DAILY_LOSS_PCT`: nessun nuovo ingresso fino alla mezzanotte UTC. **Drawdown** oltre `DRAWDOWN_REDUCE_ONLY_PCT`: stato `REDUCE_ONLY` (uscite e stop continuano) finché una persona non riprende.
+- **Kill switch** (idempotente): pulsante "Emergency Kill Switch" della dashboard, `POST /api/kill-switch` (admin), oppure il campo `killSwitch: true` nel documento Firestore `bot_runtime/control` (anche scritto a mano dalla console). Cancella gli ordini non protettivi, chiude tutte le posizioni reduceOnly, verifica il conto flat, rimuove gli stop residui e passa in `HALTED`. Se Kraken fallisce a metà riprende al ciclo di protezione successivo.
+- **Ripresa** da `REDUCE_ONLY` o `HALTED`: pulsante "Riprendi" o `POST /api/risk/resume` con `{"confirm": "CONFERMO_RIPRESA"}`; rifiutata finché il flag su Firestore è attivo.
+
 ## Comandi
 
 | Comando | Cosa fa |
@@ -39,6 +46,9 @@ La dashboard chiede l'`ADMIN_TOKEN` al primo accesso e lo salva nel browser.
 | `npm run backtest:compare` | Modello legacy vs realistico e stress sui costi (report in `docs/phase_reports/`) |
 | `npm run replay:parity` | Parità backtest ↔ percorso live in replay (orologio ed exchange simulati) |
 | `npm run golden:check` | Confronta legacy e nuovo motore con i golden versionati (`golden/legacy`, `golden/engine`) |
+| `npm run risk:audit` | Audit dei guardrail sul golden backtest (quante volte ogni limite sarebbe scattato) |
+| `npm run kraken:demo-smoke` | Smoke test dell'execution layer su Kraken **demo** (chiavi demo richieste) |
+| `npm run kraken:demo-kill -- --yes` | Prova del kill switch su Kraken **demo**: chiude tutte le posizioni del conto demo |
 | `npm run data:verify` | Verifica checksum e integrità del dataset |
 | `npm run data:download` | Ricostruisce il dataset completo da Kraken (serve rete verso futures.kraken.com) |
 | `npm run build` / `npm start` | Build di produzione e avvio |

@@ -136,6 +136,12 @@ export class FakeKrakenFutures implements KrakenFuturesApi {
     this.faults.set(method, list);
   }
 
+  /** Rimuove i guasti ancora programmati (tutti o di un metodo). */
+  clearFaults(method?: Method): void {
+    if (method) this.faults.delete(method);
+    else this.faults.clear();
+  }
+
   private takeFault(method: Method, params: unknown): Fault | null {
     const list = this.faults.get(method);
     if (!list) return null;

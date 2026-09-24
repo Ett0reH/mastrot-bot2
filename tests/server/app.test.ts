@@ -18,7 +18,11 @@ function startApp(env: Record<string, string>, overrides: { failWith?: Error } =
   };
   const app = createApp({
     config,
-    engine: { status: act('status'), start: act('start'), stop: act('stop'), reset: act('reset'), cronTick: act('cron') },
+    engine: {
+      status: act('status'), start: act('start'), stop: act('stop'), reset: act('reset'), cronTick: act('cron'),
+      killSwitch: async (source: string) => (await act(`kill:${source}`)(), { opState: 'HALTED', steps: [] }),
+      resumeRisk: async (confirmation: string) => (await act(`resume:${confirmation}`)(), { operationalState: 'RUNNING' }),
+    },
     krakenAdmin: { debugAccounts: act('debug'), emergencyCloseAndTransfer: async () => { calls.push('emergency'); return { logs: ['ok'] }; } },
     readBacktestReport: () => ({ tradeCount: 1 }),
     logError: () => {},
@@ -56,6 +60,8 @@ const protectedRoutes: [string, string][] = [
   ['POST', '/api/paper-trading/reset'],
   ['GET', '/api/debug-kraken'],
   ['POST', '/api/emergency-kraken-transfer'],
+  ['POST', '/api/kill-switch'],
+  ['POST', '/api/risk/resume'],
 ];
 
 test('le API di controllo senza token rispondono 401 e non toccano il motore', async () => {
@@ -77,6 +83,17 @@ test('token corretto → il motore viene chiamato', async () => {
   const res = await fetch(shadow.base + '/api/paper-trading/start', { method: 'POST', headers: auth(ADMIN) });
   assert.equal(res.status, 200);
   assert.ok(shadow.calls.includes('start'));
+});
+
+test('kill switch e ripresa (F5): solo con token admin; la frase di conferma arriva al motore', async () => {
+  const kill = await fetch(shadow.base + '/api/kill-switch', { method: 'POST', headers: auth(ADMIN) });
+  assert.equal(kill.status, 200);
+  assert.equal((await kill.json()).opState, 'HALTED');
+  const resume = await fetch(shadow.base + '/api/risk/resume', { method: 'POST', headers: { ...auth(ADMIN), 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: 'CONFERMO_RIPRESA' }) });
+  assert.equal(resume.status, 200);
+  const empty = await fetch(shadow.base + '/api/risk/resume', { method: 'POST', headers: auth(ADMIN) });
+  assert.equal(empty.status, 200, 'senza corpo la conferma è vuota: decide il motore (che la rifiuta)');
+  assert.deepEqual(shadow.calls.filter((c) => c.startsWith('kill') || c.startsWith('resume')), ['kill:api', 'resume:CONFERMO_RIPRESA', 'resume:']);
 });
 
 test('senza ADMIN_TOKEN configurato le API di controllo sono disabilitate (503), non aperte', async () => {

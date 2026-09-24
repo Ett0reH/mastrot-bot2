@@ -156,6 +156,13 @@ export class KrakenExecutionPort implements ExecutionPort {
     return out;
   }
 
+  /** Eventi in coda per il core, senza eseguire il ciclo di protezione (kill switch). */
+  drain(): ExecutionReport {
+    const out = this.state.queue;
+    this.state.queue = { fills: [], rejected: [] };
+    return out;
+  }
+
   async funding(hourCloseSlot: number, positions: readonly FundingPosition[]): Promise<FundingCharge[]> {
     return this.deps.funding.charges(hourCloseSlot, positions);
   }
@@ -375,8 +382,76 @@ export class KrakenExecutionPort implements ExecutionPort {
     await this.cleanOrders(openOrders);
   }
 
+  /**
+   * Kill switch (F5), idempotente e ripetibile finché il conto non è flat:
+   *   1. cancella gli ordini non protettivi; 2. chiude TUTTE le posizioni del conto reduceOnly con
+   *   cliOrdId deterministici; 3. verifica che il conto sia flat; 4. rimuove gli stop residui.
+   * Le chiusure delle posizioni del bot arrivano al core con motivo KILL_SWITCH. Se una chiamata
+   * fallisce a metà, la procedura riprende dal punto in cui è rimasta alla chiamata successiva,
+   * senza duplicare ordini (un ordine con esito incerto viene prima riconciliato).
+   */
+  async killSwitch(runId: string): Promise<{ flat: boolean; steps: string[] }> {
+    const steps: string[] = [];
+    const orders = this.deps.orders;
+    // Se la riconciliazione fallisce si prosegue comunque: gli ordini con esito incerto bloccano
+    // solo il proprio simbolo (nessun nuovo ordine finché non si chiariscono), gli altri si chiudono.
+    try {
+      await orders.reconcileAll('protective');
+    } catch (err) {
+      steps.push(`riconciliazione non riuscita (${(err as Error).message}): gli ordini con esito incerto restano in attesa`);
+    }
+    // 1. Ordini non protettivi (tutto ciò che non è uno stop reduceOnly).
+    for (const o of await this.deps.adapter.openOrders('protective')) {
+      if (o.orderType === 'stop' && o.reduceOnly) continue;
+      const r = await this.deps.adapter.cancelOrder({ order_id: o.order_id }, 'protective');
+      steps.push(`cancella ${o.symbol} ${o.orderType} ${o.order_id}: ${r.outcome === 'ok' ? r.value.status : r.error.message}`);
+    }
+    // 2. Chiusura di tutte le posizioni.
+    const positions = await this.deps.adapter.openPositions('protective');
+    for (const p of positions) {
+      const intentKey = `kill-${runId}-${p.symbol}`;
+      const previous = await orders.store.byIntent(intentKey);
+      if (previous.some((r) => !TERMINAL_STATES.has(r.state))) {
+        steps.push(`${p.symbol}: chiusura già in corso, in riconciliazione`);
+        continue;
+      }
+      const record = await orders.submit(
+        { intentKey, purpose: 'EMERGENCY_CLOSE', symbol: p.symbol, side: p.side === 'long' ? 'sell' : 'buy', orderType: 'mkt', size: p.size, reduceOnly: true },
+        previous.length + 1,
+        'protective',
+        PROTECTIVE_PROCESS_WINDOW_MS,
+      );
+      steps.push(`${p.symbol}: chiusura ${record.cliOrdId} → ${record.state}${record.lastError ? ` (${record.lastError})` : ''}`);
+    }
+    // 3. Verifica: conto flat.
+    const remaining = await this.deps.adapter.openPositions('protective');
+    if (remaining.length > 0) {
+      steps.push(`non flat: ${remaining.map((p) => `${p.symbol} ${p.side} ${p.size}`).join(', ')}`);
+      return { flat: false, steps };
+    }
+    // Chiusure delle posizioni del bot al core, con i fill reali.
+    const book = Object.values(this.state.positions);
+    if (book.length > 0) {
+      const since = Math.min(...book.map((p) => p.openedAt)) - 60_000;
+      const fills = await orders.fillsSince(new Date(since).toISOString(), 'protective');
+      for (const pos of book) await this.closedOnExchange(pos, fills, this.state.queue, 'KILL_SWITCH');
+    }
+    this.state.pendingEntries = {};
+    this.state.unknownPositions = {};
+    // 4. Stop residui.
+    const cancel = await this.deps.adapter.cancelAllOrders(undefined, 'protective');
+    steps.push(cancel.outcome === 'ok' ? `stop residui cancellati: ${cancel.value.cancelledOrders.length}` : `cancellazione degli stop residui fallita: ${cancel.error.message}`);
+    const left = await this.deps.adapter.openOrders('protective');
+    try {
+      for (const record of await orders.store.active()) await orders.reconcile(record.cliOrdId, 'protective');
+    } catch (err) {
+      steps.push(`riconciliazione finale non riuscita: ${(err as Error).message}`);
+    }
+    return { flat: left.length === 0, steps };
+  }
+
   /** La posizione non c'è più su Kraken: si attribuisce la chiusura dai fill. */
-  private async closedOnExchange(pos: BookPosition, fills: readonly FuturesFill[], queue: ExecutionReport): Promise<void> {
+  private async closedOnExchange(pos: BookPosition, fills: readonly FuturesFill[], queue: ExecutionReport, forced?: CloseReason): Promise<void> {
     const closeSide = pos.direction === 'LONG' ? 'sell' : 'buy';
     const closing = fills.filter((f) => f.symbol === pos.native && f.side === closeSide && Date.parse(f.fillTime) >= pos.openedAt - 1_000);
     if (closing.length === 0) {
@@ -388,7 +463,8 @@ export class KrakenExecutionPort implements ExecutionPort {
     const stopIds = idsOf('STOP');
     const emergencyIds = idsOf('EMERGENCY_CLOSE');
     let reason: CloseReason;
-    if (closing.some((f) => f.fillType === 'liquidation')) reason = 'LIQUIDATION';
+    if (forced) reason = forced;
+    else if (closing.some((f) => f.fillType === 'liquidation')) reason = 'LIQUIDATION';
     else if (closing.some((f) => f.cliOrdId && stopIds.has(f.cliOrdId))) reason = 'BACKSTOP';
     else if (closing.some((f) => f.cliOrdId && emergencyIds.has(f.cliOrdId))) reason = 'PROTECTION_FAILURE';
     else if (pos.closing) reason = pos.closing.reason;

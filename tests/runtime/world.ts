@@ -1,6 +1,6 @@
 // Mondo simulato per i test del runtime (F4): archivio condiviso (come Firestore), Kraken
 // simulato, dati reali 15m, orologio virtuale e istanze del bot che possono "morire" e ripartire.
-import { loadConfig } from '../../src/engine/config/config';
+import { loadConfig, type RiskLimits } from '../../src/engine/config/config';
 import { REALISTIC_PROFILE } from '../../src/engine/backtest/profiles';
 import { loadBacktestData } from '../../src/engine/backtest/runner';
 import { BAR_15M_MS, type Candle, KRAKEN_NATIVE_SYMBOLS } from '../../src/engine/data/dataset';
@@ -21,8 +21,11 @@ import { FAKE_INSTRUMENTS, FakeKrakenFutures } from '../../src/engine/sim/fakeKr
 import { GOLDEN_WINDOWS } from '../../scripts/golden/windows';
 
 export const SYMBOLS = GOLDEN_WINDOWS.find((w) => w.id === '2022H1')!.symbols;
-export const DEMO_CONFIG = loadConfig({ TRADING_MODE: 'demo', KRAKEN_DEMO_API_KEY: 'dk', KRAKEN_DEMO_API_SECRET: 'ds', CAPITAL_CAP_USD: '10000' }).config;
-export const SHADOW_CONFIG = loadConfig({ CAPITAL_CAP_USD: '10000' }).config;
+// Cap di 10.000 $ come il golden; il nozionale massimo scala con il cap come nei default della
+// sezione 2 (1.000 $ di nozionale per 1.000 $ di cap), gli altri limiti sono percentuali o conteggi.
+const LIMITS_10K = { CAPITAL_CAP_USD: '10000', MAX_POSITION_NOTIONAL_USD: '10000' };
+export const DEMO_CONFIG = loadConfig({ TRADING_MODE: 'demo', KRAKEN_DEMO_API_KEY: 'dk', KRAKEN_DEMO_API_SECRET: 'ds', ...LIMITS_10K }).config;
+export const SHADOW_CONFIG = loadConfig(LIMITS_10K).config;
 export const MIN = 60_000;
 
 const dataCache = new Map<string, Record<string, Candle[]>>();
@@ -77,8 +80,10 @@ function reach(world: World, id: string, state: { alive: boolean }): FakeKrakenF
   });
 }
 
-export function makeInstance(world: World, id: string, options: { docs?: MemoryDocumentStore; mode?: 'demo' | 'shadow'; writeBudget?: number } = {}) {
+export function makeInstance(world: World, id: string, options: { docs?: MemoryDocumentStore; mode?: 'demo' | 'shadow'; writeBudget?: number; limits?: Partial<RiskLimits> } = {}) {
   const docs = options.docs ?? world.docs;
+  const base = options.mode === 'shadow' ? SHADOW_CONFIG : DEMO_CONFIG;
+  const config = options.limits ? { ...base, limits: { ...base.limits, ...options.limits } } : base;
   const now = world.now;
   const budget = new WriteBudget(options.writeBudget ?? 5_000, now);
   const store = new BotStore(docs, budget, now);
@@ -87,7 +92,7 @@ export function makeInstance(world: World, id: string, options: { docs?: MemoryD
   const state = { alive: true };
   const source = new ReplayCandleSource(world.data, now, () => 20_000);
   if (options.mode === 'shadow') {
-    const runtime = new BotRuntime({ config: SHADOW_CONFIG, now, store, lease, source, alerts }, { startMs: world.startMs });
+    const runtime = new BotRuntime({ config, now, store, lease, source, alerts }, { startMs: world.startMs });
     return { id, runtime, store, lease, alerts, docs, state, orders: null };
   }
   const adapter = new KrakenAdapter(reach(world, id, state), { now, sleep: world.sleep, canWrite: () => lease.canWrite() });
@@ -95,7 +100,7 @@ export function makeInstance(world: World, id: string, options: { docs?: MemoryD
   const instruments = new InstrumentRegistry(() => adapter.instruments(), now);
   const stops = new StopManager(orders, adapter, instruments, alerts, { now });
   const runtime = new BotRuntime(
-    { config: DEMO_CONFIG, now, store, lease, source, alerts, kraken: { adapter, orders, stops, instruments, funding: new FundingFromLedgerPending(), ledger: new AccountLedger(adapter, docs, () => budget.recordWrite()) } },
+    { config, now, store, lease, source, alerts, kraken: { adapter, orders, stops, instruments, funding: new FundingFromLedgerPending(), ledger: new AccountLedger(adapter, docs, () => budget.recordWrite()) } },
     { startMs: world.startMs },
   );
   return { id, runtime, store, lease, alerts, docs, state, orders };

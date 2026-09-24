@@ -69,10 +69,17 @@ test('reset consentito solo in shadow (con ordini reali lo stato non si azzera m
   const demo = makeInstance(world, 'A');
   await demo.runtime.ensureRunning();
   await assert.rejects(() => demo.runtime.reset(), /non consentito/);
-  const shadow = makeInstance(makeWorld(), 'S', { mode: 'shadow' });
+  const shadowWorld = makeWorld();
+  const shadow = makeInstance(shadowWorld, 'S', { mode: 'shadow' });
   await shadow.runtime.ensureRunning();
+  for (const t of tickTimes(shadowWorld.startMs, Date.parse('2022-01-22T12:00:00Z'))) await step(shadowWorld, [shadow], t);
+  assert.notEqual(shadow.runtime.statusPayload().realizedEquity, 10_000, 'lo shadow ha operato');
   await shadow.runtime.reset();
   assert.equal(await shadow.runtime.ensureRunning(), 'RUNNING');
+  const fresh = shadow.runtime.statusPayload();
+  assert.equal(fresh.realizedEquity, 10_000, 'stato nuovo, non quello salvato prima del reset (D43)');
+  assert.deepEqual(fresh.openPositions, []);
+  assert.deepEqual(fresh.closedTrades, []);
 });
 
 test('D28: la size si calcola sull equity limitata dal collateral del conto (senza toccare drawdown e massimo)', async () => {

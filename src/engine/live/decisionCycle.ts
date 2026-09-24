@@ -242,6 +242,14 @@ export class DecisionCycle {
     return this.core.openPositions();
   }
 
+  /** Applica fill e rifiuti arrivati fuori da un tick (kill switch). */
+  applyExternal(report: ExecutionReport): { trades: TradeRecord[] } {
+    const trades: TradeRecord[] = [];
+    this.applyFills(report.fills, trades);
+    for (const r of report.rejected) this.core.rejectIntent(r.positionId);
+    return { trades };
+  }
+
   /** Annulla un intento rimasto in sospeso (recovery: ordine mai inviato). */
   rejectPending(positionId: string): void {
     this.core.rejectIntent(positionId);

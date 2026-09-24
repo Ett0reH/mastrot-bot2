@@ -50,8 +50,11 @@ function encode(path: string, data: object): Record<string, unknown> {
 }
 
 function decode<T>(raw: Record<string, unknown> | undefined): T | null {
-  if (!raw || typeof raw.payload !== 'string') return null;
-  return JSON.parse(raw.payload) as T;
+  if (!raw) return null;
+  if (typeof raw.payload === 'string') return JSON.parse(raw.payload) as T;
+  // Documento scritto a mano dalla console di Firestore (es. il flag del kill switch in
+  // `bot_runtime/control`): i campi si leggono così come sono.
+  return raw as T;
 }
 
 async function guard<T>(what: string, op: () => Promise<T>): Promise<T> {

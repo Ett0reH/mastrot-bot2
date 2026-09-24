@@ -33,6 +33,8 @@ import { type Alert, type AlertCode, type AlertLevel, type AlertSink, makeAlert 
 import type { BotStore, EquityPoint, RuntimeSnapshot } from '../persistence/botStore';
 import { SimExecutionPort } from '../replay/replay';
 import type { RestingStop } from '../sim/simExchange';
+import { checkEntry, evaluateEquity, type EquityWatch, type OperationalState } from '../risk/riskGuard';
+import type { Fill, OpenIntent } from '../core/types';
 import { GatedExecutionPort } from './gatedPort';
 import type { LeaseManager } from './lease';
 
@@ -74,7 +76,23 @@ export interface RuntimeOptions {
   startMs?: number;
 }
 
-type Snapshot = RuntimeSnapshot<PortSnapshot> & { runtime: RuntimeSnapshot['runtime'] & { startMs: number; ledgerLastId?: number } };
+interface RiskRuntimeState {
+  opState: OperationalState;
+  equityWatch: EquityWatch;
+  dailyLossBlockUntil: number | null;
+  /** Riferimento del drawdown per il guardrail (la ripresa manuale lo riporta all'equity corrente). */
+  riskHighWater: number | null;
+  killRun: { runId: string; source: string; requestedAt: string } | null;
+}
+
+type Snapshot = RuntimeSnapshot<PortSnapshot> & { runtime: RuntimeSnapshot['runtime'] & { startMs: number; ledgerLastId?: number; risk?: RiskRuntimeState } };
+
+function initialRiskState(): RiskRuntimeState {
+  return { opState: 'RUNNING', equityWatch: { dayStart: null }, dailyLossBlockUntil: null, riskHighWater: null, killRun: null };
+}
+
+/** Frase richiesta per riprendere da REDUCE_ONLY o HALTED (azione di una persona). */
+export const RESUME_CONFIRMATION = 'CONFERMO_RIPRESA';
 
 /** Intervallo di lettura dell'account log (le API di storico hanno un budget ridotto). */
 const LEDGER_SYNC_MS = 10 * 60_000;
@@ -94,6 +112,7 @@ export class BotRuntime {
   private lastPruneDay = '';
   private lastDecisionAt: number | null = null;
   private ledgerLastId = 0;
+  private risk: RiskRuntimeState = initialRiskState();
   private lastLedgerSync = 0;
   readonly recentLedger: LedgerEntry[] = [];
   private lock: Promise<unknown> = Promise.resolve();
@@ -203,9 +222,10 @@ export class BotRuntime {
     const cycle = this.cycle as DecisionCycle;
     try {
       if (this.port instanceof KrakenExecutionPort) {
-        // 3-5. Intenti in sospeso, riconciliazione con Kraken e verifica degli stop.
+        // 3-5. Intenti in sospeso, riconciliazione con Kraken e verifica degli stop. Con un kill
+        // switch in corso la riconciliazione la fa il kill switch stesso (chiusure KILL_SWITCH).
         await this.adoptPendingIntents(this.port, cycle);
-        await this.port.protect();
+        if (this.risk.opState !== 'HALTING') await this.port.protect();
       }
       // 6. Storico delle candele e ripresa.
       await cycle.start();
@@ -228,6 +248,7 @@ export class BotRuntime {
     const snap = this.snapshot;
     this.paused = snap?.runtime.paused ?? false;
     this.ledgerLastId = snap?.runtime.ledgerLastId ?? 0;
+    if (snap?.runtime.risk) this.risk = snap.runtime.risk;
     this.startMs = snap?.runtime.startMs ?? this.options.startMs ?? Math.floor(now / BAR_15M_MS) * BAR_15M_MS + BAR_15M_MS;
     const kraken = this.deps.kraken;
     if (kraken) {
@@ -242,7 +263,7 @@ export class BotRuntime {
       const simState = snap && snap.port.kind === 'sim' ? snap.port.state : { stops: [] };
       this.port = new SimExecutionPort(REALISTIC_PROFILE.execution, { kind: 'none' }, simState);
     }
-    const gate = new GatedExecutionPort(this.port, () => this.entryBlockReason());
+    const gate = new GatedExecutionPort(this.port, (intent, approved) => this.guardEntry(intent, approved));
     this.cycle = new DecisionCycle(this.cycleConfig(this.startMs), { source: this.deps.source, port: gate, checkpoint: () => this.checkpoint() }, snap?.core);
   }
 
@@ -287,6 +308,7 @@ export class BotRuntime {
         lastDecisionAt: this.lastDecisionAt === null ? null : new Date(this.lastDecisionAt).toISOString(),
         startMs: this.startMs,
         ledgerLastId: this.ledgerLastId,
+        risk: this.risk,
       },
     };
   }
@@ -315,6 +337,136 @@ export class BotRuntime {
     }
   }
 
+  // --- Guardrail (F5) ----------------------------------------------------------------------------
+
+  /** Controllo di ogni ingresso prima dell'invio: pausa, persistenza, lease e RiskGuard. */
+  private guardEntry(intent: OpenIntent, approved: readonly OpenIntent[]): string | null {
+    const block = this.entryBlockReason();
+    if (block !== null) return block;
+    const cycle = this.cycle as DecisionCycle;
+    const core = cycle.state;
+    const equity = core.capital?.trueEquity ?? core.realizedEquity;
+    const verdict = checkEntry(
+      intent,
+      {
+        state: this.risk.opState,
+        dailyLossBlockUntil: this.risk.dailyLossBlockUntil,
+        openPositions: cycle.openPositions().filter((p) => !core.pendingCloses[p.id]),
+        approved,
+        // Mai oltre il collateral del conto (sezione 2).
+        equity: core.sizingEquityCap === null ? equity : Math.min(equity, core.sizingEquityCap),
+        now: this.deps.now(),
+      },
+      this.deps.config.limits,
+    );
+    if (verdict.outcome === 'allowed') return null;
+    const unexpected = verdict.code !== 'REDUCE_ONLY' && verdict.code !== 'HALTED' && verdict.code !== 'DAILY_LOSS';
+    if (unexpected) void this.alert('warning', 'RISK_REJECTED', `Ingresso ${intent.symbol} rifiutato dal RiskGuard (${verdict.code}): ${verdict.reason}`, { positionId: intent.positionId });
+    return `${verdict.code}: ${verdict.reason}`;
+  }
+
+  /** Perdita giornaliera e drawdown dopo ogni ciclo decisionale. */
+  private async evaluateRisk(now: number): Promise<void> {
+    const core = (this.cycle as DecisionCycle).state;
+    if (!core.capital) return;
+    const trueEquity = core.capital.trueEquity;
+    this.risk.riskHighWater = Math.max(this.risk.riskHighWater ?? core.maxHistoricalEquity, trueEquity);
+    const e = evaluateEquity(this.risk.equityWatch, { trueEquity, maxHistoricalEquity: this.risk.riskHighWater }, now, this.deps.config.limits);
+    this.risk.equityWatch = { dayStart: e.dayStart };
+    if (e.dailyLossBlockUntil !== null && this.risk.dailyLossBlockUntil !== e.dailyLossBlockUntil) {
+      this.risk.dailyLossBlockUntil = e.dailyLossBlockUntil;
+      await this.alert('critical', 'RISK_LIMIT', `Perdita giornaliera ${e.dailyLossPct.toFixed(2)}% (limite ${this.deps.config.limits.maxDailyLossPct}%): nessun nuovo ingresso fino a ${new Date(e.dailyLossBlockUntil).toISOString()}`);
+    }
+    if (this.risk.dailyLossBlockUntil !== null && now >= this.risk.dailyLossBlockUntil) this.risk.dailyLossBlockUntil = null;
+    if (e.drawdownBreached && this.risk.opState === 'RUNNING') {
+      this.risk.opState = 'REDUCE_ONLY';
+      await this.alert('critical', 'RISK_LIMIT', `Drawdown ${e.drawdownPct.toFixed(2)}% (limite ${this.deps.config.limits.drawdownReduceOnlyPct}%): REDUCE_ONLY, solo uscite. Ripresa solo manuale`);
+    }
+  }
+
+  /** Kill switch: da API, dashboard o flag. Idempotente: una seconda richiesta non ne avvia un'altra. */
+  killSwitch(source: string): Promise<{ opState: OperationalState; steps: string[] }> {
+    return this.exclusive(async () => {
+      if (this.status !== 'RUNNING') {
+        throw new Error(`Kill switch non eseguibile: runtime ${this.status}. In emergenza POST /api/emergency-kraken-transfer chiude le posizioni direttamente su Kraken`);
+      }
+      if (this.risk.opState === 'HALTED') return { opState: 'HALTED' as OperationalState, steps: ['già fermo: nessuna azione'] };
+      if (!this.risk.killRun) {
+        this.risk.killRun = { runId: new Date(this.deps.now()).toISOString().replace(/[^0-9]/g, '').slice(0, 14), source, requestedAt: new Date(this.deps.now()).toISOString() };
+        this.risk.opState = 'HALTING';
+        await this.persist();
+        await this.alert('critical', 'KILL_SWITCH', `Kill switch attivato (${source}): chiusura di tutte le posizioni`);
+      }
+      return this.killStep();
+    });
+  }
+
+  /** Un passo del kill switch; si ripete a ogni ciclo di protezione finché il conto non è flat. */
+  private async killStep(): Promise<{ opState: OperationalState; steps: string[] }> {
+    const run = this.risk.killRun as NonNullable<RiskRuntimeState['killRun']>;
+    const cycle = this.cycle as DecisionCycle;
+    let flat: boolean;
+    let steps: string[];
+    if (this.port instanceof KrakenExecutionPort) {
+      ({ flat, steps } = await this.port.killSwitch(run.runId));
+      const { trades } = cycle.applyExternal(this.port.drain());
+      await this.afterTick({ processedSlots: 0, waiting: false, lastSlot: cycle.state.lastSlot, intents: [], journal: [], trades, events: [], equity: [] });
+    } else {
+      // Shadow: chiusure simulate all'ultimo prezzo noto e cancellazione degli stop simulati.
+      const core = cycle.state;
+      const fee = this.coreConfig().feeRate;
+      const fills: Fill[] = cycle.openPositions().map((p) => {
+        const price = core.lastClose[p.symbol] ?? p.trade.entryPrice;
+        return { kind: 'CLOSE', symbol: p.symbol, positionId: p.id, price, size: p.trade.size, fee: p.trade.size * price * fee, time: this.deps.now(), exitType: 'KILL_SWITCH', source: 'sim' };
+      });
+      for (const id of Object.keys(core.pendingOpens)) cycle.rejectPending(id);
+      const { trades } = cycle.applyExternal({ fills, rejected: [] });
+      (this.port as SimExecutionPort).exchange.cancelAll();
+      await this.afterTick({ processedSlots: 0, waiting: false, lastSlot: core.lastSlot, intents: [], journal: [], trades, events: [], equity: [] });
+      flat = true;
+      steps = [`chiuse ${fills.length} posizioni simulate`];
+    }
+    if (flat) {
+      for (const id of Object.keys(cycle.state.pendingOpens)) cycle.rejectPending(id);
+      const leftover = cycle.openPositions();
+      if (leftover.length > 0) await this.alert('critical', 'DESYNC', `Kill switch: conto flat ma il core ha ancora ${leftover.map((p) => p.id).join(', ')}`);
+      this.risk.opState = 'HALTED';
+      await this.alert('critical', 'KILL_SWITCH', `Kill switch completato: conto flat, bot fermo (${run.source})`, { steps });
+    }
+    await this.persist();
+    return { opState: this.risk.opState, steps };
+  }
+
+  /** Ripresa da REDUCE_ONLY o HALTED: solo con conferma esplicita di una persona. */
+  resumeRisk(confirmation: string): Promise<OperationalState> {
+    return this.exclusive(async () => {
+      if (confirmation !== RESUME_CONFIRMATION) throw new Error(`Conferma mancante: inviare "${RESUME_CONFIRMATION}"`);
+      if (this.risk.opState === 'HALTING') throw new Error('Kill switch in corso: attendere HALTED');
+      // Da RUNNING non c'è nulla da riprendere (e il riferimento del drawdown non si sposta).
+      if (this.risk.opState === 'RUNNING') throw new Error('Nessuna ripresa necessaria: il bot è già in RUNNING');
+      if (await this.controlFlag()) throw new Error('Il flag kill switch su Firestore è ancora attivo: disattivarlo prima');
+      const core = this.cycle?.state;
+      this.risk = { ...this.risk, opState: 'RUNNING', killRun: null, riskHighWater: core?.capital?.trueEquity ?? core?.realizedEquity ?? null };
+      await this.persist();
+      await this.alert('warning', 'MODE_CHANGE', 'Ripresa manuale: ingressi riabilitati (riferimento del drawdown del guardrail riportato all equity attuale)');
+      return this.risk.opState;
+    });
+  }
+
+  /**
+   * Flag kill switch su Firestore (`bot_runtime/control`, campo `killSwitch`), impostabile anche a
+   * mano dalla console senza passare dalle API. Vale come attivo `true` o la stringa "true".
+   */
+  private async controlFlag(): Promise<boolean> {
+    const control = await this.deps.store.docs.get<{ killSwitch?: unknown }>('bot_runtime/control');
+    const flag = control?.killSwitch;
+    return flag === true || (typeof flag === 'string' && flag.trim().toLowerCase() === 'true');
+  }
+
+  get operationalState(): OperationalState {
+    return this.risk.opState;
+  }
+
   // --- Cicli ------------------------------------------------------------------------------------
 
   decisionTick(now: number): Promise<TickResult | null> {
@@ -324,6 +476,7 @@ export class BotRuntime {
         await this.onLeaseLost();
         return null;
       }
+      if (this.risk.opState === 'HALTING') return null; // il kill switch ha la precedenza
       const cycle = this.cycle as DecisionCycle;
       let result: TickResult;
       try {
@@ -337,6 +490,7 @@ export class BotRuntime {
       this.counters.decisionTicks++;
       if (result.processedSlots > 0) this.lastDecisionAt = now;
       await this.afterTick(result);
+      await this.evaluateRisk(now);
       await this.persist();
       return result;
     });
@@ -355,8 +509,17 @@ export class BotRuntime {
       await this.alert('info', 'EXIT', `Trade chiuso ${trade.symbol} ${trade.type} (${trade.reason}): ${trade.pnl.toFixed(2)} $`, { positionId });
     }
     if (this.recentTrades.length > 200) this.recentTrades.length = 200;
+    // Intenti respinti (guardrail o exchange): nel journal con il motivo e nel log.
+    const intents = new Map(result.intents.map((i) => [i.positionId, i] as const));
+    const rejected: DecisionRecord[] = [];
+    for (const event of result.events) {
+      if (event.type !== 'INTENT_REJECTED') continue;
+      const intent = intents.get(event.positionId);
+      rejected.push({ slotTime: event.slot, symbol: intent?.symbol ?? event.positionId.split('-')[0], action: 'REJECTED', reason: `${intent?.kind ?? 'intento'} ${event.positionId}: ${event.reason}`, ...(intent ? { direction: intent.direction } : {}) });
+      this.log('warn', `Intento ${event.positionId} respinto: ${event.reason}`);
+    }
     const bySlot = new Map<number, DecisionRecord[]>();
-    for (const r of result.journal) bySlot.set(r.slotTime, [...(bySlot.get(r.slotTime) ?? []), r]);
+    for (const r of [...result.journal, ...rejected]) bySlot.set(r.slotTime, [...(bySlot.get(r.slotTime) ?? []), r]);
     for (const [slot, records] of bySlot) {
       this.recentJournal.push(...records);
       try {
@@ -392,6 +555,31 @@ export class BotRuntime {
         return;
       }
       this.counters.protectionTicks++;
+      // Una lettura fallita del flag non deve fermare la protezione (stop e riconciliazione).
+      let flag = false;
+      try {
+        flag = this.risk.opState === 'RUNNING' || this.risk.opState === 'REDUCE_ONLY' ? await this.controlFlag() : false;
+      } catch (err) {
+        this.lastError = `flag del kill switch non letto: ${(err as Error).message}`;
+        this.log('warn', this.lastError);
+      }
+      if (flag) {
+        this.risk.killRun = { runId: new Date(now).toISOString().replace(/[^0-9]/g, '').slice(0, 14), source: 'flag Firestore', requestedAt: new Date(now).toISOString() };
+        this.risk.opState = 'HALTING';
+        await this.persist();
+        await this.alert('critical', 'KILL_SWITCH', 'Kill switch attivato dal flag su Firestore: chiusura di tutte le posizioni');
+      }
+      if (this.risk.opState === 'HALTING') {
+        // Il kill switch ha la precedenza sulla protezione ordinaria; si ripete finché non è flat.
+        try {
+          await this.killStep();
+        } catch (err) {
+          this.lastError = `kill switch: ${(err as Error).message}`;
+          this.log('warn', this.lastError);
+          await this.persist();
+        }
+        return;
+      }
       if (this.port instanceof KrakenExecutionPort) {
         try {
           await this.port.protect();
@@ -485,7 +673,10 @@ export class BotRuntime {
   reset(): Promise<void> {
     return this.exclusive(async () => {
       if (this.mode !== 'shadow') throw new Error('Reset non consentito in demo e live');
+      // Lo stato salvato va eliminato: il recovery lo rileggerebbe dopo aver preso il lease.
+      await this.deps.store.deleteSnapshot();
       this.snapshot = null;
+      this.risk = initialRiskState();
       this.startMs = null;
       this.cycle = null;
       this.port = null;
@@ -538,9 +729,13 @@ export class BotRuntime {
     return {
       tradingMode: this.mode,
       runtimeStatus: this.status,
-      status: this.status === 'RUNNING' ? (this.paused ? 'PAUSED' : 'RUNNING') : this.status,
-      isActive: this.status === 'RUNNING' && !this.paused,
+      status: this.status === 'RUNNING' ? (this.risk.opState !== 'RUNNING' ? this.risk.opState : this.paused ? 'PAUSED' : 'RUNNING') : this.status,
+      isActive: this.status === 'RUNNING' && !this.paused && this.risk.opState === 'RUNNING',
       paused: this.paused,
+      operationalState: this.risk.opState,
+      dailyLossBlockUntil: this.risk.dailyLossBlockUntil === null ? null : new Date(this.risk.dailyLossBlockUntil).toISOString(),
+      killSwitch: this.risk.killRun,
+      limits: this.deps.config.limits,
       entryBlock: this.status === 'RUNNING' ? this.entryBlockReason() : this.status,
       startTime: new Date(this.startedAt).toISOString(),
       lastUpdate: new Date(now).toISOString(),

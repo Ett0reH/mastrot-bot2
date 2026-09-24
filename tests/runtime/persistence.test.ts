@@ -121,6 +121,9 @@ test('Firestore: payload JSON più campi indice; query sui campi indicizzati; er
   const lease = await store.transact<{ holder: string }>('bot_runtime/lease', (cur) => (cur ? null : { holder: 'A' }));
   assert.deepEqual(lease, { holder: 'A' });
   assert.deepEqual(await store.transact<{ holder: string }>('bot_runtime/lease', () => null), { holder: 'A' });
+  // Documento scritto a mano dalla console (flag del kill switch, F5): campi letti così come sono.
+  fs.data.set('bot_runtime/control', { killSwitch: true });
+  assert.deepEqual(await store.get('bot_runtime/control'), { killSwitch: true });
   fs.fail(true);
   await assert.rejects(() => store.get('orders/mt-e-1'), StoreUnavailableError);
   await assert.rejects(() => store.set('orders/x', {}), StoreUnavailableError);

@@ -63,6 +63,8 @@ async function startServer() {
         return runtime.statusPayload();
       },
       cronTick: async () => ({ isActive: runtime.statusPayload().isActive === true, heartbeat: scheduler.lastHeartbeat }),
+      killSwitch: async (source) => runtime.killSwitch(source),
+      resumeRisk: async (confirmation) => ({ operationalState: await runtime.resumeRisk(confirmation) }),
     },
     krakenAdmin: createKrakenAdmin(config),
     readBacktestReport: () => {

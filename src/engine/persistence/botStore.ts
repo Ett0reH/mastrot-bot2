@@ -126,6 +126,13 @@ export class BotStore {
     return snap;
   }
 
+  /** Elimina lo stato salvato (solo per il reset dello shadow). */
+  async deleteSnapshot(): Promise<void> {
+    await this.docs.delete('bot_runtime/state');
+    this.budget.recordWrite();
+    this.snapshotHash = null;
+  }
+
   /** Salva lo stato se è cambiato. Restituisce true se ha scritto. */
   async saveSnapshot<P>(snapshot: Omit<RuntimeSnapshot<P>, 'savedAt' | 'version'>): Promise<boolean> {
     const full: RuntimeSnapshot<P> = { version: 1, savedAt: '', ...snapshot };

@@ -8,7 +8,7 @@ export type EngineName = 'EXTREME' | 'NORMAL' | 'NONE';
  * Uscita decisa dal core (legacy) oppure avvenuta sull'exchange: backstop nativo, chiusura
  * esterna (manuale), liquidazione, chiusura d'emergenza per protezione mancante (I7).
  */
-export type CloseReason = ExitReason | 'BACKSTOP' | 'EXTERNAL_CLOSE' | 'LIQUIDATION' | 'PROTECTION_FAILURE';
+export type CloseReason = ExitReason | 'BACKSTOP' | 'EXTERNAL_CLOSE' | 'LIQUIDATION' | 'PROTECTION_FAILURE' | 'KILL_SWITCH';
 
 /** Posizione gestita dal core. `trade` è la struttura valutata da PositionExitLayer. */
 export interface CorePosition {
@@ -93,7 +93,8 @@ export interface Fill {
 export interface DecisionRecord {
   slotTime: number;
   symbol: string;
-  action: 'NO_SIGNAL' | 'COOLDOWN' | 'BLOCKED' | 'TIER_BLOCKED' | 'SIZE_ZERO' | 'OPEN' | 'CLOSE' | 'HOLD' | 'HALTED' | 'PENDING_ORDER';
+  /** REJECTED: intento deciso dal core e respinto prima dell'invio (guardrail) o dall'exchange. */
+  action: 'NO_SIGNAL' | 'COOLDOWN' | 'BLOCKED' | 'TIER_BLOCKED' | 'SIZE_ZERO' | 'OPEN' | 'CLOSE' | 'HOLD' | 'HALTED' | 'PENDING_ORDER' | 'REJECTED';
   reason: string;
   direction?: Direction | 'NEUTRAL';
   regime?: TradingRegime;

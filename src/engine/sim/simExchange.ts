@@ -100,6 +100,11 @@ export class SimExchange {
     return fills;
   }
 
+  /** Cancella tutti gli stop a riposo (kill switch in shadow). */
+  cancelAll(): void {
+    this.stops.clear();
+  }
+
   restingStop(positionId: string): number | null {
     return this.stops.get(positionId)?.level ?? null;
   }

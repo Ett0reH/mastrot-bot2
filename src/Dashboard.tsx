@@ -332,6 +332,31 @@ export default function Dashboard() {
     }
   };
 
+  // Kill switch (F5, D30): chiude tutte le posizioni, cancella gli ordini, verifica il conto flat e ferma il bot.
+  const handleKillSwitch = async () => {
+    if (!window.confirm('KILL SWITCH: chiude TUTTE le posizioni, cancella gli ordini e ferma il bot. Continuare?')) return;
+    try {
+      const res = await apiFetch('/api/kill-switch', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) alert(`Kill switch non eseguito: ${data.error}`);
+      else alert(`Kill switch: ${data.opState}\n${(data.steps ?? []).join('\n')}`);
+    } catch (err: any) {
+      if (!reportAuthError(err)) alert(`Errore del kill switch: ${err.message}`);
+    }
+  };
+
+  const handleResumeRisk = async () => {
+    const confirmation = window.prompt('Ripresa dopo REDUCE_ONLY o kill switch. Scrivi CONFERMO_RIPRESA per confermare:');
+    if (!confirmation) return;
+    try {
+      const res = await apiFetch('/api/risk/resume', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: confirmation }) });
+      const data = await res.json();
+      alert(res.ok ? `Stato operativo: ${data.operationalState}` : `Ripresa non eseguita: ${data.error}`);
+    } catch (err: any) {
+      if (!reportAuthError(err)) alert(`Errore di ripresa: ${err.message}`);
+    }
+  };
+
   const handleResetLive = async () => {
     if (!resetConfirm) {
       setResetConfirm(true);
@@ -1103,13 +1128,21 @@ export default function Dashboard() {
 
                     <button 
                       onClick={() => {
-                        handleStopLive();
+                        handleKillSwitch();
                         setActiveTab('live');
                       }}
                       className="w-full bg-[#B91C1C] hover:bg-[#991B1B] text-white rounded font-bold text-[10px] tracking-widest uppercase py-3.5 mt-6 transition-colors border border-[#B91C1C] shadow-[0_0_15px_rgba(185,28,28,0.2)]"
                     >
                       Emergency Kill Switch
                     </button>
+                    {(liveState?.operationalState === 'REDUCE_ONLY' || liveState?.operationalState === 'HALTED') && (
+                      <button
+                        onClick={handleResumeRisk}
+                        className="w-full bg-transparent hover:bg-white/5 text-white/80 rounded font-bold text-[10px] tracking-widest uppercase py-3 mt-3 transition-colors border border-white/20"
+                      >
+                        Riprendi ({liveState?.operationalState})
+                      </button>
+                    )}
                   </div>
 
                 </div>
