@@ -31,6 +31,10 @@ import { coreConfigFromEngine } from '../live/liveCycleConfig';
 import type { CandleSource } from '../live/ports';
 import { type Alert, type AlertCode, type AlertLevel, type AlertSink, makeAlert, RecordingAlertSink } from '../ops/alerts';
 import { type CycleContext, Logger, type LogLevel } from '../ops/logger';
+import { buildDailyReport, type DailyReport, summarizeReport } from '../ops/dailyReport';
+import { compareDay, type DayCheckpoint, notAvailable, type ParityResult, replayDay } from '../ops/dayParity';
+import { dayOf, type DayStats, DayTracker, type TrackerState } from '../ops/dayTracker';
+import { type BotMetrics, computeMetrics } from '../ops/metrics';
 import type { BotStore, EquityPoint, RuntimeSnapshot } from '../persistence/botStore';
 import { SimExecutionPort } from '../replay/replay';
 import type { RestingStop } from '../sim/simExchange';
@@ -79,6 +83,8 @@ export interface RuntimeOptions {
   journalRetentionDays?: number;
   /** Solo test/replay: primo slot di trading per uno stato nuovo (default: il prossimo slot). */
   startMs?: number;
+  /** Etichetta della fonte dei dati quando non è Kraken dal vivo (es. replay di dati storici). */
+  dataSourceLabel?: string;
 }
 
 interface RiskRuntimeState {
@@ -90,7 +96,21 @@ interface RiskRuntimeState {
   killRun: { runId: string; source: string; requestedAt: string } | null;
 }
 
-type Snapshot = RuntimeSnapshot<PortSnapshot> & { runtime: RuntimeSnapshot['runtime'] & { startMs: number; ledgerLastId?: number; risk?: RiskRuntimeState } };
+type Snapshot = RuntimeSnapshot<PortSnapshot> & {
+  runtime: RuntimeSnapshot['runtime'] & {
+    startMs: number;
+    ledgerLastId?: number;
+    risk?: RiskRuntimeState;
+    /** Statistiche dei giorni non ancora riportati e candele mancanti recenti (F6). */
+    tracker?: TrackerState;
+    /** Giorno dell'ultimo checkpoint del core salvato per il confronto con il backtest. */
+    checkpointDay?: string | null;
+    /** Primo avvio di questo stato: il ledger di Kraken si confronta da qui in poi. */
+    firstStartedAt?: string;
+    /** Fee e funding del ledger di Kraken dal primo avvio. */
+    ledgerTotals?: { fees: number; funding: number };
+  };
+};
 
 function initialRiskState(): RiskRuntimeState {
   return { opState: 'RUNNING', equityWatch: { dayStart: null }, dailyLossBlockUntil: null, riskHighWater: null, killRun: null };
@@ -155,6 +175,16 @@ export class BotRuntime {
   private risk: RiskRuntimeState = initialRiskState();
   private lastLedgerSync = 0;
   readonly recentLedger: LedgerEntry[] = [];
+  private tracker = new DayTracker();
+  private checkpointDay: string | null = null;
+  private firstStartedAt: string | null = null;
+  private ledgerTotals = { fees: 0, funding: 0 };
+  private historyLoaded = false;
+  /** Tutti i trade chiusi dello stato attuale (dal più recente): base delle metriche. */
+  readonly allTrades: TradeRecord[] = [];
+  private readonly reportTasks = new Set<Promise<void>>();
+  private readonly reporting = new Set<string>();
+  latestReport: DailyReport | null = null;
   private lock: Promise<unknown> = Promise.resolve();
   readonly startedAt: number;
   readonly recentJournal: DecisionRecord[] = [];
@@ -305,6 +335,8 @@ export class BotRuntime {
     }
     this.status = 'RUNNING';
     this.lastError = null;
+    await this.loadHistory();
+    await this.ensureDayCheckpoint();
     await this.persist();
     this.log('info', `Runtime in esecuzione (${this.mode}, lease epoch ${this.deps.lease.lease?.epoch})`);
     return this.status;
@@ -315,6 +347,10 @@ export class BotRuntime {
     this.paused = snap?.runtime.paused ?? false;
     this.ledgerLastId = snap?.runtime.ledgerLastId ?? 0;
     if (snap?.runtime.risk) this.risk = snap.runtime.risk;
+    this.tracker = new DayTracker(snap?.runtime.tracker ?? {});
+    this.checkpointDay = snap?.runtime.checkpointDay ?? null;
+    this.firstStartedAt = snap?.runtime.firstStartedAt ?? this.firstStartedAt ?? new Date(now).toISOString();
+    this.ledgerTotals = snap?.runtime.ledgerTotals ?? this.ledgerTotals;
     this.startMs = snap?.runtime.startMs ?? this.options.startMs ?? Math.floor(now / BAR_15M_MS) * BAR_15M_MS + BAR_15M_MS;
     const kraken = this.deps.kraken;
     if (kraken) {
@@ -375,6 +411,10 @@ export class BotRuntime {
         startMs: this.startMs,
         ledgerLastId: this.ledgerLastId,
         risk: this.risk,
+        tracker: this.tracker.snapshot(),
+        checkpointDay: this.checkpointDay,
+        firstStartedAt: this.firstStartedAt ?? new Date(this.startedAt).toISOString(),
+        ledgerTotals: this.ledgerTotals,
       },
     };
   }
@@ -401,6 +441,151 @@ export class BotRuntime {
         await this.alert('critical', 'EXECUTION_ERROR', `Persistenza non disponibile (${this.failedSaves} salvataggi falliti): nuovi ingressi bloccati, protezione attiva`);
       }
     }
+  }
+
+  // --- Storico, checkpoint del giorno e report giornaliero (F6) ------------------------------------
+
+  /** Dopo un riavvio: trade, equity e journal recenti dall'archivio (dashboard e metriche). */
+  private async loadHistory(): Promise<void> {
+    if (this.historyLoaded) return;
+    this.historyLoaded = true;
+    try {
+      const trades = await this.deps.store.recentTrades(100_000);
+      this.allTrades.splice(0, this.allTrades.length, ...trades);
+      this.recentTrades.splice(0, this.recentTrades.length, ...trades.slice(0, 200));
+      this.equityHistory.splice(0, this.equityHistory.length, ...(await this.deps.store.equityHistory(30)));
+      const lastSlot = this.cycle?.state.lastSlot ?? null;
+      if (lastSlot !== null) this.recentJournal.splice(0, this.recentJournal.length, ...(await this.deps.store.decisionsBetween(lastSlot - 24 * 3_600_000, lastSlot)).slice(-500));
+    } catch (err) {
+      this.log('warn', `Storico non caricato dall archivio: ${(err as Error).message}`);
+    }
+  }
+
+  private dayCheckpoint(day: string): DayCheckpoint {
+    const cycle = this.cycle as DecisionCycle;
+    return { day, savedAt: new Date(this.deps.now()).toISOString(), core: cycle.snapshot(), simStops: this.port instanceof SimExecutionPort ? this.port.snapshot().stops : null };
+  }
+
+  private async saveDayCheckpoint(checkpoint: DayCheckpoint): Promise<void> {
+    this.checkpointDay = checkpoint.day;
+    try {
+      await this.deps.store.saveDayCheckpoint(checkpoint);
+    } catch (err) {
+      this.log('warn', `Checkpoint del giorno ${checkpoint.day} non salvato: ${(err as Error).message}`);
+    }
+  }
+
+  /** All'avvio: checkpoint del giorno in corso se manca (il confronto parte da qui). */
+  private async ensureDayCheckpoint(): Promise<void> {
+    const lastSlot = this.cycle?.state.lastSlot ?? null;
+    if (lastSlot === null) return;
+    const day = dayOf(lastSlot + BAR_15M_MS);
+    if (this.checkpointDay !== day) await this.saveDayCheckpoint(this.dayCheckpoint(day));
+  }
+
+  /** Avvia i report dei giorni conclusi (in background: il replay scarica le candele). */
+  private scheduleReports(lastSlot: number | null): void {
+    if (lastSlot === null) return;
+    for (const day of this.tracker.completedBefore(dayOf(lastSlot))) {
+      if (this.reporting.has(day)) continue;
+      // Con Kraken si aspetta una lettura dell'account log dopo la fine del giorno (fee e funding completi).
+      if (this.deps.kraken?.ledger && this.lastLedgerSync < Date.parse(`${day}T00:00:00Z`) + 86_400_000) continue;
+      this.reporting.add(day);
+      const stats = structuredClone(this.tracker.days[day]);
+      const replayFills = structuredClone(this.tracker.fillsAppliedIn(day));
+      const task: Promise<void> = this.generateReport(day, stats, replayFills)
+        .then(() => {
+          delete this.tracker.days[day];
+        })
+        .catch((err) => this.log('error', `Report del ${day} non generato: ${(err as Error).message}`))
+        .finally(() => {
+          this.reporting.delete(day);
+          this.reportTasks.delete(task);
+        });
+      this.reportTasks.add(task);
+    }
+  }
+
+  /** Attende i report in corso (test e arresto ordinato). */
+  async flushReports(): Promise<void> {
+    while (this.reportTasks.size > 0) await Promise.all([...this.reportTasks]);
+  }
+
+  private async dayParity(day: string, dayStats: DayStats, replayFills: DayStats['fills']): Promise<ParityResult> {
+    // Il replay rigioca gli slot del giorno: servono i fill APPLICATI in quegli slot (anche se eseguiti dopo mezzanotte).
+    const stats: DayStats = { ...dayStats, fills: replayFills };
+    const mode: ParityResult['mode'] = this.mode === 'shadow' ? 'simulated' : 'actual_fills';
+    const checkpoint = await this.deps.store.loadDayCheckpoint(day);
+    if (!checkpoint) return notAvailable('nessun checkpoint di inizio giorno (salvataggio saltato o archivio non disponibile)', mode);
+    if (mode === 'simulated' && stats.fills.some((f) => f.phase === 'external')) return notAvailable('kill switch nel giorno: chiusure fuori dal modello del backtest', mode);
+    const { core: _core, ...cycleConfig } = this.cycleConfig(this.startMs as number);
+    const replay = await replayDay({ mode, day, checkpoint, stats, cycle: cycleConfig, core: this.coreConfig(), source: this.deps.source });
+    const dayEnd = replay.toSlot + BAR_15M_MS;
+    const inRange = (t: TradeRecord) => Date.parse(t.exitTime) >= replay.fromSlot && Date.parse(t.exitTime) <= dayEnd;
+    return compareDay({
+      mode,
+      fromSlot: replay.fromSlot,
+      toSlot: replay.toSlot,
+      actualJournal: await this.deps.store.decisionsBetween(replay.fromSlot, replay.toSlot),
+      replayJournal: replay.journal,
+      ...(mode === 'simulated' ? { actualTrades: this.allTrades.filter(inRange), replayTrades: replay.trades.filter(inRange) } : {}),
+      missing: stats.missing,
+      recentMissing: this.tracker.recentMissing,
+      btcSymbol: this.deps.config.symbols.includes('BTC') ? 'BTC' : undefined,
+    });
+  }
+
+  private async generateReport(day: string, stats: DayStats, replayFills: DayStats['fills']): Promise<DailyReport> {
+    let parity: ParityResult;
+    try {
+      parity = await this.dayParity(day, stats, replayFills);
+    } catch (err) {
+      parity = notAvailable(`replay non riuscito: ${(err as Error).message}`, this.mode === 'shadow' ? 'simulated' : 'actual_fills');
+    }
+    const dayStart = Date.parse(`${day}T00:00:00Z`);
+    const dayEnd = dayStart + 86_400_000;
+    const before = this.equityHistory.filter((p) => p.t < dayStart).at(-1);
+    const report = buildDailyReport({
+      day,
+      mode: this.mode,
+      generatedAt: new Date(this.deps.now()).toISOString(),
+      stats,
+      trades: this.allTrades.filter((t) => t.exitTime >= `${day}T00:00:00` && t.exitTime < new Date(dayEnd).toISOString()),
+      equity: [...(before ? [before] : []), ...this.equityHistory.filter((p) => p.t >= dayStart && p.t < dayEnd)].map((p) => ({ t: p.t, equity: p.equity })),
+      ledger: this.deps.kraken ? await this.deps.store.ledgerOfDay(day) : null,
+      modelSlippageBps: REALISTIC_PROFILE.execution.slippageBps,
+      parity,
+      alerts: this.recentAlerts.filter((a) => a.at.startsWith(day)),
+    });
+    await this.deps.store.saveDailyReport(report);
+    this.latestReport = report;
+    await this.alert(report.issues.length > 0 ? 'warning' : 'info', 'DAILY_REPORT', summarizeReport(report), { day });
+    this.log('info', `Report giornaliero ${day}: parità ${parity.status}`, { day, parity: parity.status, issues: report.issues.length });
+    return report;
+  }
+
+  /** Report giornalieri per l'API (dal più recente). */
+  dailyReports(limit = 30): Promise<DailyReport[]> {
+    return this.deps.store.recentDailyReports(limit);
+  }
+
+  dailyReport(day: string): Promise<DailyReport | null> {
+    return this.deps.store.dailyReport(day);
+  }
+
+  /** Metriche del bot, dagli stessi dati del ledger (trade, equity) e confrontate con Kraken. */
+  metrics(): BotMetrics {
+    const core = this.cycle?.state ?? null;
+    const cap = this.deps.config.limits.capitalCapUsd;
+    return computeMetrics({
+      initialEquity: cap,
+      currentEquity: core?.capital?.trueEquity ?? core?.realizedEquity ?? cap,
+      realizedEquity: core?.realizedEquity ?? cap,
+      trades: this.allTrades,
+      equity: this.equityHistory.map((p) => ({ t: p.t, equity: p.equity })),
+      ledger: this.deps.kraken ? this.ledgerTotals : null,
+      now: this.deps.now(),
+    });
   }
 
   // --- Guardrail (F5) ----------------------------------------------------------------------------
@@ -475,8 +660,8 @@ export class BotRuntime {
     let steps: string[];
     if (this.port instanceof KrakenExecutionPort) {
       ({ flat, steps } = await this.port.killSwitch(run.runId));
-      const { trades } = cycle.applyExternal(this.port.drain());
-      await this.afterTick({ processedSlots: 0, waiting: false, lastSlot: cycle.state.lastSlot, intents: [], journal: [], trades, events: [], equity: [] });
+      const { trades, fills } = cycle.applyExternal(this.port.drain());
+      await this.afterTick({ processedSlots: 0, waiting: false, lastSlot: cycle.state.lastSlot, intents: [], journal: [], trades, events: [], equity: [], fills });
     } else {
       // Shadow: chiusure simulate all'ultimo prezzo noto e cancellazione degli stop simulati.
       const core = cycle.state;
@@ -486,9 +671,9 @@ export class BotRuntime {
         return { kind: 'CLOSE', symbol: p.symbol, positionId: p.id, price, size: p.trade.size, fee: p.trade.size * price * fee, time: this.deps.now(), exitType: 'KILL_SWITCH', source: 'sim' };
       });
       for (const id of Object.keys(core.pendingOpens)) cycle.rejectPending(id);
-      const { trades } = cycle.applyExternal({ fills, rejected: [] });
+      const applied = cycle.applyExternal({ fills, rejected: [] });
       (this.port as SimExecutionPort).exchange.cancelAll();
-      await this.afterTick({ processedSlots: 0, waiting: false, lastSlot: core.lastSlot, intents: [], journal: [], trades, events: [], equity: [] });
+      await this.afterTick({ processedSlots: 0, waiting: false, lastSlot: core.lastSlot, intents: [], journal: [], trades: applied.trades, events: [], equity: [], fills: applied.fills });
       flat = true;
       steps = [`chiuse ${fills.length} posizioni simulate`];
     }
@@ -544,6 +729,9 @@ export class BotRuntime {
       }
       if (this.risk.opState === 'HALTING') return null; // il kill switch ha la precedenza
       const cycle = this.cycle as DecisionCycle;
+      // Il prossimo slot apre un nuovo giorno UTC: lo stato di adesso è il checkpoint del giorno.
+      const before = cycle.state.lastSlot;
+      const crossing = before !== null && dayOf(before) !== dayOf(before + BAR_15M_MS) && this.checkpointDay !== dayOf(before + BAR_15M_MS) ? this.dayCheckpoint(dayOf(before + BAR_15M_MS)) : null;
       let result: TickResult;
       try {
         result = await cycle.tick(now);
@@ -555,8 +743,11 @@ export class BotRuntime {
       }
       this.counters.decisionTicks++;
       if (result.processedSlots > 0) this.lastDecisionAt = now;
+      if (crossing && result.processedSlots > 0) await this.saveDayCheckpoint(crossing);
+      else if (this.checkpointDay === null) await this.ensureDayCheckpoint(); // stato nuovo: primo checkpoint
       await this.afterTick(result);
       await this.evaluateRisk(now);
+      this.scheduleReports(result.lastSlot);
       await this.persist();
       return result;
     });
@@ -564,14 +755,20 @@ export class BotRuntime {
 
   private async afterTick(result: TickResult): Promise<void> {
     const store = this.deps.store;
+    this.tracker.record(result, this.deps.now());
     for (const intent of result.intents) {
       const detail = intent.kind === 'OPEN' ? `${intent.direction} size ${intent.size} leva ${intent.leverage}x rif. ${intent.referencePrice}` : intent.kind === 'CLOSE' ? `${intent.exitType} rif. ${intent.referencePrice}` : `stop ${intent.strategyStop} backstop ${intent.backstop}`;
       this.log('info', `Intento ${intent.kind} ${intent.symbol}: ${detail}`, { positionId: intent.positionId, symbol: intent.symbol });
+    }
+    // In demo e live l'alert di ingresso lo invia la porta Kraken (con il cliOrdId); in shadow qui.
+    for (const fill of result.fills.filter((f) => f.kind === 'OPEN' && f.source === 'sim')) {
+      await this.alert('info', 'ENTRY', `Ingresso ${fill.side === 'buy' ? 'LONG' : 'SHORT'} ${fill.symbol} (simulato): ${Number(fill.size.toPrecision(6))} a ${fill.price}`, { positionId: fill.positionId });
     }
     for (const trade of result.trades) {
       const positionId = `${trade.symbol.split('/')[0]}-${trade.entryTime}`;
       this.log('info', `Trade chiuso ${trade.symbol} ${trade.type} (${trade.reason}): ${trade.pnl.toFixed(2)} $`, { positionId, pnl: trade.pnl, reason: trade.reason });
       this.recentTrades.unshift(trade);
+      this.allTrades.unshift(trade);
       try {
         await store.appendTrade(positionId, trade);
       } catch (err) {
@@ -684,6 +881,12 @@ export class BotRuntime {
     this.ledgerLastId = lastId;
     this.recentLedger.push(...added);
     if (this.recentLedger.length > 200) this.recentLedger.splice(0, this.recentLedger.length - 200);
+    // Totali dal primo avvio del bot (le voci precedenti del conto non sono del bot).
+    const since = this.firstStartedAt ?? new Date(this.startedAt).toISOString();
+    for (const e of added.filter((x) => x.date >= since)) {
+      this.ledgerTotals.fees += e.fee ?? 0;
+      this.ledgerTotals.funding += e.realizedFunding ?? 0;
+    }
     for (const e of added.filter((x) => x.kind === 'transfer')) {
       await this.alert('warning', 'ACCOUNT_TRANSFER', `${e.balanceChange >= 0 ? 'Deposito' : 'Prelievo'} di ${Math.abs(e.balanceChange)} ${e.asset.toUpperCase()} sul conto (${e.info}): l'equity del bot non cambia, il collateral sì`, { ledgerId: e.id });
     }
@@ -746,8 +949,15 @@ export class BotRuntime {
       if (this.mode !== 'shadow') throw new Error('Reset non consentito in demo e live');
       // Lo stato salvato va eliminato: il recovery lo rileggerebbe dopo aver preso il lease.
       await this.deps.store.deleteSnapshot();
+      await this.deps.store.clearHistory();
       this.snapshot = null;
       this.risk = initialRiskState();
+      this.tracker = new DayTracker();
+      this.checkpointDay = null;
+      this.firstStartedAt = null;
+      this.ledgerTotals = { fees: 0, funding: 0 };
+      this.allTrades.length = 0;
+      this.latestReport = null;
       this.startMs = null;
       this.cycle = null;
       this.port = null;
@@ -862,6 +1072,7 @@ export class BotRuntime {
     const lastSlot = core?.lastSlot ?? null;
     return {
       tradingMode: this.mode,
+      dataSource: this.options.dataSourceLabel ?? null,
       runtimeStatus: this.status,
       status: this.status === 'RUNNING' ? (this.risk.opState !== 'RUNNING' ? this.risk.opState : this.paused ? 'PAUSED' : 'RUNNING') : this.status,
       isActive: this.status === 'RUNNING' && !this.paused && this.risk.opState === 'RUNNING',
@@ -897,6 +1108,8 @@ export class BotRuntime {
         transfers: this.recentLedger.filter((e) => e.kind === 'transfer').map((e) => ({ id: e.id, date: e.date, amount: e.balanceChange, info: e.info })),
       },
       writes: this.deps.store.budget.snapshot(),
+      metrics: this.metrics(),
+      latestReport: this.latestReport,
       alerts: this.recentAlerts.slice(-50).reverse(),
       counters: this.counters,
       lastError: this.lastError,

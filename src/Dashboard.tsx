@@ -1,1158 +1,734 @@
-import React, { useEffect, useState, useRef, useMemo } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Activity, Hexagon, Download, FileText, TrendingUp, Shield, Sliders, GitBranch } from 'lucide-react';
-import { AreaChart, Area, ResponsiveContainer, Tooltip, YAxis, XAxis, ReferenceLine } from 'recharts';
-import { runQuantPipeline, RegimePolicy, RegimeType } from './lib/quantEngine';
-import { calculateMetrics } from './lib/metricsCalculator';
+// Dashboard del bot (F6): solo dati reali letti dalle API del runtime, nessun valore di esempio.
+// - /api/paper-trading/status: stato, posizioni con lo stato dello stop nativo, trade, journal, alert, metriche
+// - /api/health/details: lease, età dei dati, cicli, protezione, errori recenti
+// - /api/reports/daily: report giornalieri con il confronto con il backtest sugli stessi dati
+// Tutte le API richiedono ADMIN_TOKEN (F1). Orari in UTC, come i dati del bot.
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Activity, AlertTriangle, CheckCircle2, FileText, Shield, TrendingUp, XCircle } from 'lucide-react';
 import { apiFetch, AuthRequiredError, type AuthProblem, getAdminToken, setAdminToken } from './lib/api';
 
-interface SystemState {
-  session: string;
-  marketStream: string;
-  userStream: string;
-  driftMs: number;
-  modelFreshnessMs: number;
-  lastReconciliation: string;
-  regime: string;
-  confidence: number;
-  uncertainty: boolean;
-  equity: number;
-  cash: number;
-  positions: number;
-  orders: number;
-  degradedModes: string[];
-  errors: string[];
+// I payload arrivano dal server, che è la fonte di verità: tipizzati in modo lasco qui.
+type Json = any;
+
+const usd = (v?: number | null) => (v == null || !Number.isFinite(v) ? '—' : `${v < 0 ? '−' : ''}$${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+const signedUsd = (v?: number | null) => (v == null ? '—' : `${v > 0 ? '+' : ''}${usd(v)}`);
+const pct = (v?: number | null, digits = 2) => (v == null || !Number.isFinite(v) ? '—' : `${v.toFixed(digits)}%`);
+const num = (v?: number | null, digits = 2) => (v == null || !Number.isFinite(v) ? '—' : v.toFixed(digits));
+const size = (v?: number | null) => (v == null || !Number.isFinite(v) ? '—' : String(Number(v.toPrecision(6))));
+const price = (v?: number | null) => (v == null || !Number.isFinite(v) ? '—' : v >= 100 ? v.toFixed(2) : v >= 1 ? v.toFixed(4) : v.toPrecision(4));
+const utc = (v?: string | number | null) => (v == null ? '—' : `${new Date(v).toISOString().replace('T', ' ').slice(0, 16)} UTC`);
+const hhmm = (v?: string | number | null) => (v == null ? '—' : new Date(v).toISOString().slice(11, 16));
+function duration(ms?: number | null): string {
+  if (ms == null || !Number.isFinite(ms)) return '—';
+  const minutes = Math.round(ms / 60_000);
+  const d = Math.floor(minutes / 1440);
+  const h = Math.floor((minutes % 1440) / 60);
+  const m = minutes % 60;
+  return d > 0 ? `${d}g ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
-interface BacktestTrade {
-  symbol: string;
-  type?: 'LONG' | 'SHORT';
-  entryTime: string;
-  entryPrice: number;
-  exitTime: string;
-  exitPrice: number;
-  pnl: number;
-  pnlPercent: number;
-  reason: string;
+const MODE_STYLE: Record<string, string> = {
+  shadow: 'text-sky-300 border-sky-400/40 bg-sky-400/10',
+  demo: 'text-amber-300 border-amber-400/40 bg-amber-400/10',
+  live: 'text-red-300 border-red-500/60 bg-red-500/15',
+};
+const PROTECTION: Record<string, [string, string]> = {
+  NATIVE_STOP_OK: ['Stop nativo OK', 'text-emerald-400 border-emerald-400/40 bg-emerald-400/10'],
+  UNPROTECTED: ['Senza stop', 'text-red-400 border-red-500/60 bg-red-500/15'],
+  PENDING: ['In attesa', 'text-amber-300 border-amber-400/40 bg-amber-400/10'],
+  SIMULATED: ['Stop simulato', 'text-white/60 border-white/20 bg-white/5'],
+};
+const ACTION_STYLE: Record<string, string> = {
+  OPEN: 'text-emerald-400 font-semibold',
+  CLOSE: 'text-sky-300 font-semibold',
+  HOLD: 'text-white/60',
+  NO_SIGNAL: 'text-white/30',
+  REJECTED: 'text-red-400 font-semibold',
+  NO_DATA: 'text-amber-300',
+  PENDING_ORDER: 'text-violet-300',
+};
+const PARITY: Record<string, [string, string]> = {
+  IDENTICAL: ['Identica', 'text-emerald-400 border-emerald-400/40 bg-emerald-400/10'],
+  EXPLAINED: ['Differenze spiegate', 'text-sky-300 border-sky-400/40 bg-sky-400/10'],
+  DIVERGENT: ['Divergente', 'text-red-400 border-red-500/60 bg-red-500/15'],
+  NOT_AVAILABLE: ['Non disponibile', 'text-white/50 border-white/20 bg-white/5'],
+};
+const LEVEL_STYLE: Record<string, string> = { critical: 'text-red-400', warning: 'text-amber-300', info: 'text-white/50' };
+
+function Badge({ text, className }: { text: string; className: string }) {
+  return <span className={`inline-flex items-center px-2 py-0.5 rounded border text-[10px] font-bold tracking-wider uppercase whitespace-nowrap ${className}`}>{text}</span>;
 }
 
-interface BacktestStats {
-  totalRet: string;
-  annRet: string;
-  sharpe: string;
-  sortino: string;
-  calmar: string;
-  maxDD: string;
-  avgDD: string;
-  ulcer: string;
-  maxDDDuration: string;
-  maxDDRecovery: string;
-  trades: number;
-  trailStops: number;
-  hitRate: string;
-  trailPct: string;
-  profFactor: string;
-  avgWin: string;
-  avgLoss: string;
-  folds: { fold: number, ret: number, sharpe: number }[];
-  equityCurve?: {time: string, equity: number}[];
-  regimes: { name: string, bars: number, ret: number, ann: number, sharpe: number, hr: number }[];
+function Panel({ title, right, children, className = '' }: { title: string; right?: React.ReactNode; children: React.ReactNode; className?: string }) {
+  return (
+    <section className={`border border-white/5 bg-[#1A1C22]/80 rounded-lg overflow-hidden flex flex-col ${className}`}>
+      <div className="px-5 py-3 border-b border-white/5 flex items-center justify-between gap-3">
+        <span className="font-bold text-[11px] tracking-widest uppercase text-white/80">{title}</span>
+        {right}
+      </div>
+      {children}
+    </section>
+  );
 }
 
-interface BacktestReport {
-  finalEquity: number;
-  netPnL: number;
-  tradeCount: number;
-  winRate: number;
-  trades: BacktestTrade[];
-  stats?: BacktestStats;
-  mlModel?: {
-    features: string[];
-    weightsLong: number[];
-    weightsShort: number[];
-  }
+function Kpi({ label, value, sub, tone = 'text-white/90' }: { label: string; value: string; sub?: string; tone?: string }) {
+  return (
+    <div className="border border-white/5 bg-[#1A1C22]/80 rounded-lg p-4 min-h-[104px] flex flex-col justify-between">
+      <div className="text-[10px] font-bold tracking-widest text-white/40 uppercase">{label}</div>
+      <div>
+        <div className={`text-2xl font-bold tracking-tight ${tone}`}>{value}</div>
+        {sub && <div className="text-[11px] text-white/40 mt-0.5">{sub}</div>}
+      </div>
+    </div>
+  );
+}
+
+function Empty({ text }: { text: string }) {
+  return <div className="p-10 text-center text-white/25 text-sm">{text}</div>;
+}
+
+function Row({ label, value, tone = 'text-white/85' }: { label: string; value: React.ReactNode; tone?: string }) {
+  return (
+    <div className="flex justify-between items-center gap-4 py-1.5 border-b border-white/5 last:border-0 text-[12px]">
+      <span className="text-white/45">{label}</span>
+      <span className={`font-mono text-right ${tone}`}>{value}</span>
+    </div>
+  );
 }
 
 export default function Dashboard() {
-  const [state, setState] = useState<SystemState | null>(null);
-  const [backtest, setBacktest] = useState<BacktestReport | null>(null);
-  const [activeTab, setActiveTab] = useState<'live' | 'metrics'>('live');
-  const [isTraining, setIsTraining] = useState(false);
-  const [trainingProgress, setTrainingProgress] = useState<number>(0);
-  const [liveState, setLiveState] = useState<any>(null);
-  const [equityTimeframe, setEquityTimeframe] = useState<'1H'|'4H'|'1D'>('1H');
-  const [resetConfirm, setResetConfirm] = useState(false);
-  // Autenticazione delle API di controllo (F1): null = nessun problema noto.
+  const [tab, setTab] = useState<'live' | 'metrics' | 'reports'>('live');
+  const [live, setLive] = useState<Json | null>(null);
+  const [health, setHealth] = useState<Json | null>(null);
+  const [reports, setReports] = useState<Json[]>([]);
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [equityRange, setEquityRange] = useState<'1D' | '7D' | '30D'>('7D');
   const [authProblem, setAuthProblem] = useState<{ code: AuthProblem; message: string } | null>(null);
   const [tokenInput, setTokenInput] = useState('');
   const [hasToken, setHasToken] = useState<boolean>(() => !!getAdminToken());
-  const authBlocked = useRef(false);
+  const [serverError, setServerError] = useState<string | null>(null);
+  const [resetConfirm, setResetConfirm] = useState(false);
+  const authBlocked = useRef(!getAdminToken());
 
-  const reportAuthError = (err: unknown): boolean => {
+  const reportAuthError = useCallback((err: unknown): boolean => {
     if (err instanceof AuthRequiredError) {
       authBlocked.current = true;
       setAuthProblem({ code: err.code, message: err.message });
       return true;
     }
     return false;
-  };
+  }, []);
+
+  /** GET autenticato: aggiorna lo stato o registra il problema (token o server non raggiungibile). */
+  const load = useCallback(
+    async (path: string, apply: (data: Json) => void) => {
+      if (authBlocked.current) return;
+      try {
+        const res = await apiFetch(path);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        apply(await res.json());
+        setServerError(null);
+      } catch (err) {
+        if (!reportAuthError(err)) setServerError(`Server non raggiungibile o in errore (${(err as Error).message})`);
+      }
+    },
+    [reportAuthError],
+  );
+
+  useEffect(() => {
+    if (!hasToken) {
+      authBlocked.current = true;
+      setAuthProblem({ code: 'UNAUTHORIZED', message: 'Inserisci ADMIN_TOKEN per vedere e controllare il bot.' });
+      return;
+    }
+    const pollStatus = () => load('/api/paper-trading/status', setLive);
+    const pollHealth = () => load('/api/health/details', setHealth);
+    const pollReports = () => load('/api/reports/daily?limit=14', (data) => setReports(Array.isArray(data) ? data : []));
+    pollStatus();
+    pollHealth();
+    pollReports();
+    const timers = [setInterval(pollStatus, 3_000), setInterval(pollHealth, 10_000), setInterval(pollReports, 60_000)];
+    return () => timers.forEach(clearInterval);
+  }, [hasToken, load]);
 
   const saveToken = () => {
     const token = tokenInput.trim();
     if (!token) return;
     setAdminToken(token);
-    setHasToken(true);
     setTokenInput('');
     authBlocked.current = false;
     setAuthProblem(null);
+    setHasToken(true);
   };
 
   const logout = () => {
     setAdminToken(null);
     setHasToken(false);
-    setLiveState(null);
-    authBlocked.current = true;
-    setAuthProblem({ code: 'UNAUTHORIZED', message: 'Token rimosso: inseriscilo per controllare il bot.' });
+    setLive(null);
+    setHealth(null);
+    setReports([]);
   };
-  
-  const handleTrain = async () => {
-    setIsTraining(true);
-    setTrainingProgress(0);
-    
+
+  /** POST di controllo; restituisce il corpo JSON o null (errore già mostrato). */
+  const post = async (path: string, label: string, body?: unknown): Promise<Json | null> => {
     try {
-      // Simulate progress visually
-      for (let i = 0; i <= 100; i += 5) {
-         setTrainingProgress(i);
-         await new Promise(r => setTimeout(r, 50));
+      const res = await apiFetch(path, { method: 'POST', ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        window.alert(`${label} non eseguito: ${data.error ?? `HTTP ${res.status}`}`);
+        return null;
       }
-
-      // Fetch the latest full backtest from the backend 
-      // (assumes 'npx tsx src/server/backtest/run.ts' ran recently)
-      const res = await fetch('/api/system/backtest');
-      if (res.ok) {
-        const finalReport = await res.json();
-        setBacktest(finalReport);
-        setActiveTab('metrics');
-      } else {
-        alert("Nessun report trovato. Esegui il backtest da terminale.");
-      }
-    } catch (e: any) {
-      console.error("[FATAL] Pipeline failed:", e.message);
-      alert(`Pipeline Failed: ${e.message}`);
-    }
-
-    setIsTraining(false);
-  };
-
-  useEffect(() => {
-    let isMounted = true;
-    const fetchState = async () => {
-      try {
-        const res = await fetch('/api/system/state');
-        if (!res.ok) {
-          throw new Error('Server returned ' + res.status);
-        }
-        const data = await res.json();
-        if (isMounted) setState(data);
-      } catch (err) {
-        // Silently handle backend restarts/unavailability without polluting logs
-        // The interval will keep retrying until the server comes back up
-      }
-    };
-    
-    fetchState();
-    const interval = setInterval(fetchState, 1500);
-
-    const fetchLiveState = async () => {
-      if (authBlocked.current) return; // in attesa del token: niente richieste inutili
-      try {
-        const res = await apiFetch('/api/paper-trading/status');
-        if (res.ok) {
-          const data = await res.json();
-          if (isMounted) setLiveState(data);
-        }
-      } catch (err) {
-        if (isMounted) reportAuthError(err);
-      }
-    };
-    fetchLiveState();
-    const liveInterval = setInterval(fetchLiveState, 2000);
-
-    return () => {
-      isMounted = false;
-      clearInterval(interval);
-      clearInterval(liveInterval);
-    };
-  }, []);
-
-  useEffect(() => {
-    const fetchBacktest = async () => {
-      try {
-        const res = await fetch('/api/system/backtest');
-        if (res.ok) {
-          const data = await res.json();
-          setBacktest(data);
-        }
-      } catch (err) {
-        console.error("Failed to fetch backtest report:", err);
-      }
-    };
-    fetchBacktest();
-  }, []);
-
-  const metrics = useMemo(() => {
-    return calculateMetrics(liveState);
-  }, [liveState?.equityHistory, liveState?.openPositions, liveState?.balance, liveState?.recentTrades, liveState?.metricsHistory]);
-
-  const chartData = useMemo(() => {
-    let points = [];
-    if (!liveState?.equityHistory || liveState?.equityHistory.length === 0) {
-      const now = Date.now();
-      const current = liveState?.balance || 10000;
-      points = [
-        { equity: current, timestamp: now - 1000 },
-        { equity: current, timestamp: now }
-      ];
-    } else {
-      points = liveState?.equityHistory.map((d: any) => ({
-        ...d,
-        timestamp: new Date(d.time).getTime()
-      }));
-      
-      // Fallback array for Recharts: It needs at least 2 points to draw an area map.
-      // If we only have 1 data point (e.g. at boot), we append a live projection up to "now".
-      if (points.length === 1) {
-        points.push({
-          ...points[0],
-          timestamp: Date.now()
-        });
-      }
-    }
-    
-    // Filter by timeframe
-    const now = Date.now();
-    let cutoff = 0;
-    if (equityTimeframe === '1H') cutoff = now - 60 * 60 * 1000;
-    else if (equityTimeframe === '4H') cutoff = now - 4 * 60 * 60 * 1000;
-    else if (equityTimeframe === '1D') cutoff = now - 24 * 60 * 60 * 1000;
-    
-    let filtered = points.filter((p: any) => p.timestamp >= cutoff);
-    if (filtered.length < 2) filtered = points;
-    
-    return filtered;
-  }, [liveState?.equityHistory, equityTimeframe]);
-
-  const { chartTicks, referenceLines } = useMemo(() => {
-    if (chartData.length === 0) return { chartTicks: [], referenceLines: [] };
-    const minTime = chartData[0].timestamp;
-    const maxTime = chartData[chartData.length - 1].timestamp;
-
-    const ticks = [];
-    const refs = [];
-    const startObj = new Date(minTime);
-    startObj.setHours(0, 0, 0, 0); // Start edge of day
-    let currentTick = startObj.getTime();
-    
-    // Add markers every 6 hours
-    const SIX_HOURS = 6 * 60 * 60 * 1000;
-    while (currentTick <= maxTime) {
-      if (currentTick >= minTime) {
-        ticks.push(currentTick);
-        const d = new Date(currentTick);
-        const hrs = d.getHours();
-        if (hrs === 0) {
-            refs.push({ time: currentTick, label: d.toLocaleDateString(undefined, { day: '2-digit', month: 'short' }), color: '#40C057', opacity: 0.2 });
-        } else if (hrs === 12) {
-            refs.push({ time: currentTick, label: '12h', color: '#666', opacity: 0.1 });
-        } else {
-            refs.push({ time: currentTick, label: '6h', color: '#333', opacity: 0.05 });
-        }
-      }
-      currentTick += SIX_HOURS;
-    }
-    return { chartTicks: ticks, referenceLines: refs };
-  }, [chartData]);
-
-  if (!state) {
-    return (
-      <div className="flex items-center justify-center h-screen bg-[#0E0E0E] text-[#808080] font-mono text-sm tracking-widest">
-        <Activity className="mr-3 h-4 w-4 animate-spin text-[#40C057]" />
-        INITIALIZING CORE SYSTEMS...
-      </div>
-    );
-  }
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'HEALTHY':
-      case 'NORMAL':
-      case 'CALM': return 'text-[#40C057] border-[#40C057]/30 bg-[#40C057]/10';
-      case 'DEGRADED_DATA': 
-      case 'TURBULENT': return 'text-[#FCC419] border-[#FCC419]/30 bg-[#FCC419]/10';
-      case 'PANIC':
-      case 'UNCERTAINTY_MODE': 
-      case 'RISK_HALTED':
-      case 'SYSTEM_HALTED': return 'text-[#FA5252] border-[#FA5252]/30 bg-[#FA5252]/10';
-      default: return 'text-[#808080] border-[#333333] bg-[#1A1A1A]';
+      return data;
+    } catch (err) {
+      if (!reportAuthError(err)) window.alert(`${label}: ${(err as Error).message}`);
+      return null;
     }
   };
 
-  const handleStartLive = async () => {
-    try {
-      const res = await apiFetch('/api/paper-trading/start', { method: 'POST' });
-      
-      const contentType = res.headers.get("content-type");
-      if (!contentType || !contentType.includes("application/json")) {
-         throw new Error("Il server si sta riavviando o non è al momento disponibile (502/504). Riprova tra qualche istante.");
-      }
-      
-      const data = await res.json();
-      if (res.ok) setLiveState(data);
-      else alert(`Error: ${data.error}`);
-    } catch (err: any) {
-      if (!reportAuthError(err)) alert(`Errore di avvio: ${err.message}`);
-    }
+  const handleResume = async () => {
+    const data = await post('/api/paper-trading/start', 'Ripresa');
+    if (data) setLive(data);
   };
-
-  const handleStopLive = async () => {
-    try {
-      const res = await apiFetch('/api/paper-trading/stop', { method: 'POST' });
-      const contentType = res.headers.get("content-type");
-      if (!contentType || !contentType.includes("application/json")) {
-         throw new Error("Il server si sta riavviando o non è al momento disponibile. Riprova tra poco.");
-      }
-      const data = await res.json();
-      setLiveState(data);
-    } catch (err: any) {
-      if (!reportAuthError(err)) alert(`Errore di stop: ${err.message}`);
-    }
+  const handlePause = async () => {
+    const data = await post('/api/paper-trading/stop', 'Pausa');
+    if (data) setLive(data);
   };
-
   // Kill switch (F5, D30): chiude tutte le posizioni, cancella gli ordini, verifica il conto flat e ferma il bot.
   const handleKillSwitch = async () => {
     if (!window.confirm('KILL SWITCH: chiude TUTTE le posizioni, cancella gli ordini e ferma il bot. Continuare?')) return;
-    try {
-      const res = await apiFetch('/api/kill-switch', { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok) alert(`Kill switch non eseguito: ${data.error}`);
-      else alert(`Kill switch: ${data.opState}\n${(data.steps ?? []).join('\n')}`);
-    } catch (err: any) {
-      if (!reportAuthError(err)) alert(`Errore del kill switch: ${err.message}`);
-    }
+    const data = await post('/api/kill-switch', 'Kill switch');
+    if (data) window.alert(`Kill switch: ${data.opState}\n${(data.steps ?? []).join('\n')}`);
   };
-
   const handleResumeRisk = async () => {
     const confirmation = window.prompt('Ripresa dopo REDUCE_ONLY o kill switch. Scrivi CONFERMO_RIPRESA per confermare:');
     if (!confirmation) return;
-    try {
-      const res = await apiFetch('/api/risk/resume', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: confirmation }) });
-      const data = await res.json();
-      alert(res.ok ? `Stato operativo: ${data.operationalState}` : `Ripresa non eseguita: ${data.error}`);
-    } catch (err: any) {
-      if (!reportAuthError(err)) alert(`Errore di ripresa: ${err.message}`);
-    }
+    const data = await apiFetch('/api/risk/resume', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: confirmation }) })
+      .then(async (res) => ({ ok: res.ok, body: await res.json() }))
+      .catch((err) => {
+        if (!reportAuthError(err)) window.alert(`Errore di ripresa: ${err.message}`);
+        return null;
+      });
+    if (data) window.alert(data.ok ? `Stato operativo: ${data.body.operationalState}` : `Ripresa non eseguita: ${data.body.error}`);
   };
-
-  const handleResetLive = async () => {
+  const handleReset = async () => {
     if (!resetConfirm) {
       setResetConfirm(true);
-      setTimeout(() => setResetConfirm(false), 5000);
+      setTimeout(() => setResetConfirm(false), 5_000);
       return;
     }
     setResetConfirm(false);
-    
-    try {
-      const res = await apiFetch('/api/paper-trading/reset', { method: 'POST' });
-      const contentType = res.headers.get("content-type");
-      if (!contentType || !contentType.includes("application/json")) {
-         throw new Error("Il server si sta riavviando o non è al momento disponibile. Riprova tra poco.");
-      }
-      const data = await res.json();
-      if (res.ok) {
-        setLiveState(data);
-      } else {
-        alert(`Reset failed: ${data.error}`);
-      }
-    } catch (err: any) {
-      if (!reportAuthError(err)) alert(`Reset failed: ${err.message}`);
-    }
+    const data = await post('/api/paper-trading/reset', 'Reset');
+    if (data) setLive(data);
+  };
+  const handleTestAlert = async () => {
+    const data = await post('/api/alerts/test', 'Alert di prova');
+    if (data) window.alert(`Alert di prova inviato su ${data.channel}`);
   };
 
+  const equityData = useMemo(() => {
+    const points: { t: number; equity: number }[] = (live?.equityHistory ?? []).map((p: Json) => ({ t: p.t, equity: p.equity }));
+    const span = { '1D': 1, '7D': 7, '30D': 30 }[equityRange] * 86_400_000;
+    const last = points.at(-1)?.t ?? 0;
+    return points.filter((p) => p.t >= last - span);
+  }, [live?.equityHistory, equityRange]);
+
+  const mode: string = live?.tradingMode ?? health?.mode ?? '—';
+  const metrics: Json = live?.metrics ?? null;
+  const selectedReport = reports.find((r) => r.day === selectedDay) ?? reports[0] ?? null;
+  const unprotected = (live?.openPositions ?? []).filter((p: Json) => p.protection === 'UNPROTECTED' || p.protection === 'PENDING');
+  const opState: string | undefined = live?.operationalState;
+  const warnings: string[] = [
+    ...(health && !health.healthy ? health.issues : []),
+    ...(live?.runtimeStatus && live.runtimeStatus !== 'RUNNING' ? [`Runtime ${live.runtimeStatus}${live.lastError ? `: ${live.lastError}` : ''}`] : []),
+    ...(opState && opState !== 'RUNNING' ? [`Stato operativo ${opState}${opState === 'REDUCE_ONLY' ? ': solo uscite, ripresa manuale' : opState === 'HALTED' ? ': bot fermo dopo il kill switch' : ''}`] : []),
+    ...(live?.dailyLossBlockUntil ? [`Perdita giornaliera oltre il limite: nessun ingresso fino a ${utc(live.dailyLossBlockUntil)}`] : []),
+    ...(live?.paused ? ['Bot in pausa: nessun nuovo ingresso, uscite e stop attivi'] : []),
+  ];
+
   return (
-    <div className="min-h-screen bg-[#111216] text-[#E0E0E0] font-sans flex flex-col selection:bg-[#34D399]/30 relative">
-      {/* Subtle Grid Background */}
-      <div 
-        className="absolute inset-0 z-0 opacity-20 pointer-events-none" 
-        style={{ 
-          backgroundImage: 'linear-gradient(#ffffff 1px, transparent 1px), linear-gradient(90deg, #ffffff 1px, transparent 1px)', 
-          backgroundSize: '80px 80px',
-          backgroundPosition: 'center center'
-        }}
-      ></div>
-      <div className="absolute inset-0 z-0 bg-gradient-to-b from-transparent to-[#111216] pointer-events-none"></div>
-      
-      <div className="relative z-10 flex flex-col h-screen overflow-hidden">
-        
-        {/* Top Navbar */}
-        <header className="flex-shrink-0 border-b border-white/5 bg-[#1A1C22]/80 backdrop-blur-md px-4 md:px-8 flex items-center justify-between h-[64px]">
-          <div className="flex items-center h-full">
-            <div className="font-sans font-bold text-[#3B82F6] text-[18px] tracking-wider mr-8">
-              ARBITER
+    <div className="min-h-screen bg-[#111216] text-[#E0E0E0] font-sans flex flex-col">
+      <header className="flex-shrink-0 border-b border-white/5 bg-[#1A1C22]/90 px-4 md:px-8 flex items-center justify-between h-[60px] gap-4">
+        <div className="flex items-center h-full gap-8">
+          <div className="font-bold text-[#3B82F6] text-[18px] tracking-wider">ARBITER</div>
+          <nav className="flex gap-6 h-full">
+            {([['live', 'Dashboard'], ['metrics', 'Metriche'], ['reports', 'Report']] as const).map(([key, label]) => (
+              <button key={key} onClick={() => setTab(key)} className={`h-full border-b-2 font-bold text-[12px] tracking-widest uppercase ${tab === key ? 'border-[#3B82F6] text-[#3B82F6]' : 'border-transparent text-white/40 hover:text-white/80'}`}>
+                {label}
+              </button>
+            ))}
+          </nav>
+        </div>
+        <div className="flex items-center gap-4">
+          {live && <div className="font-mono text-[#93C5FD] text-sm hidden sm:block">{usd(live.balance)}</div>}
+          <span data-testid="mode-badge" className={`px-3 py-1 rounded border font-mono text-[11px] font-bold tracking-widest ${MODE_STYLE[mode] ?? 'text-white/50 border-white/20'}`}>
+            {mode.toUpperCase()}
+          </span>
+          {live?.dataSource && <Badge text={live.dataSource} className="text-violet-300 border-violet-400/40 bg-violet-400/10" />}
+          {hasToken && (
+            <button onClick={logout} className="text-[10px] font-mono tracking-widest text-white/40 hover:text-white/80 uppercase">
+              Esci
+            </button>
+          )}
+        </div>
+      </header>
+
+      {authProblem && (
+        <div className="bg-[#FFB020]/10 border-b border-[#FFB020]/30 p-4 md:px-8">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 max-w-[1400px] mx-auto">
+            <div>
+              <h3 className="text-[#FFB020] font-bold uppercase tracking-widest text-[12px] mb-0.5">{authProblem.code === 'ADMIN_DISABLED' ? 'Controllo del bot disabilitato' : 'Accesso richiesto'}</h3>
+              <p className="text-[#FFB020]/80 text-[11px] font-mono">{authProblem.code === 'ADMIN_DISABLED' ? 'Il server non ha ADMIN_TOKEN configurato: imposta la variabile e riavvia il server.' : authProblem.message}</p>
             </div>
-            <div className="flex gap-6 h-full mt-0.5">
-              <button 
-                onClick={() => setActiveTab('live')}
-                className={`h-full flex items-center border-b-2 font-bold text-[12px] tracking-widest transition-colors ${activeTab === 'live' ? 'border-[#3B82F6] text-[#3B82F6]' : 'border-transparent text-white/40 hover:text-white/80'}`}
+            {authProblem.code === 'UNAUTHORIZED' && (
+              <form
+                className="flex gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  saveToken();
+                }}
               >
-                DASHBOARD
-              </button>
-              <button 
-                onClick={() => setActiveTab('metrics')}
-                className={`h-full flex items-center border-b-[2px] font-bold text-[12px] tracking-widest transition-colors ${activeTab === 'metrics' ? 'border-[#3B82F6] text-[#3B82F6]' : 'border-transparent text-white/40 hover:text-white/80'}`}
-              >
-                METRICHE
-              </button>
-            </div>
-          </div>
-          
-          <div className="flex items-center gap-4">
-            <div className="font-mono text-[#3B82F6] font-medium text-sm tracking-tight hidden sm:block">
-              ${(liveState?.balance || 10000).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
-            </div>
-            <div className="border border-[#3B82F6]/30 bg-[#3B82F6]/5 text-[#3B82F6] px-3 py-1.5 text-[10px] items-center flex rounded font-mono tracking-widest font-bold">
-              {((state as any)?.tradingMode || 'shadow').toUpperCase()} MODE
-            </div>
-            {hasToken && (
-              <button onClick={logout} className="text-[10px] font-mono tracking-widest text-white/40 hover:text-white/80 uppercase">
-                Esci
-              </button>
+                <input type="password" autoComplete="current-password" placeholder="ADMIN_TOKEN" value={tokenInput} onChange={(e) => setTokenInput(e.target.value)} className="bg-[#1A1C22] border border-white/10 rounded px-3 py-2 text-[12px] font-mono text-white/90 w-64" />
+                <button type="submit" className="bg-[#FFB020] text-black px-4 py-2 rounded font-bold text-[10px] tracking-widest uppercase">
+                  Accedi
+                </button>
+              </form>
             )}
-            <div className="hidden sm:flex items-center gap-3 text-white/40 ml-2">
-              <Activity className="w-4 h-4 cursor-pointer hover:text-white/80" />
-              <Hexagon className="w-4 h-4 cursor-pointer hover:text-white/80" />
-            </div>
           </div>
-        </header>
+        </div>
+      )}
 
-        {/* Accesso alle API di controllo (F1) */}
-        {authProblem && (
-          <div className="bg-[#FFB020]/10 border-b border-[#FFB020]/30 p-4 md:px-8 flex-shrink-0">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 max-w-[1400px] mx-auto">
-              <div>
-                <h3 className="text-[#FFB020] font-bold uppercase tracking-widest text-[12px] mb-0.5">
-                  {authProblem.code === 'ADMIN_DISABLED' ? 'Controllo del bot disabilitato' : 'Accesso richiesto'}
-                </h3>
-                <p className="text-[#FFB020]/80 text-[11px] font-mono">
-                  {authProblem.code === 'ADMIN_DISABLED'
-                    ? 'Il server non ha ADMIN_TOKEN configurato: imposta la variabile e riavvia il server.'
-                    : authProblem.message}
-                </p>
-              </div>
-              {authProblem.code === 'UNAUTHORIZED' && (
-                <form
-                  className="flex gap-2"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    saveToken();
-                  }}
-                >
-                  <input
-                    type="password"
-                    autoComplete="current-password"
-                    placeholder="ADMIN_TOKEN"
-                    value={tokenInput}
-                    onChange={(e) => setTokenInput(e.target.value)}
-                    className="bg-[#1A1C22] border border-white/10 rounded px-3 py-2 text-[12px] font-mono text-white/90 w-64"
-                  />
-                  <button type="submit" className="bg-[#FFB020] text-black px-4 py-2 rounded font-bold text-[10px] tracking-widest uppercase">
-                    Accedi
+      {serverError && !authProblem && <div className="bg-red-500/10 border-b border-red-500/30 px-4 md:px-8 py-2 text-red-300 text-[12px] font-mono">{serverError}</div>}
+
+      {warnings.length > 0 && (
+        <div data-testid="warnings" className="bg-amber-400/10 border-b border-amber-400/30 px-4 md:px-8 py-3">
+          <div className="max-w-[1400px] mx-auto flex gap-3 items-start">
+            <AlertTriangle className="w-4 h-4 text-amber-300 mt-0.5 flex-shrink-0" />
+            <ul className="text-amber-200/90 text-[12px] font-mono space-y-0.5">
+              {warnings.map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
+
+      <main className="flex-1 p-4 md:p-6 lg:p-8 pb-16">
+        <div className="max-w-[1400px] mx-auto flex flex-col gap-5">
+          {!live ? (
+            <Empty text={authProblem ? 'Accedi per vedere lo stato del bot.' : 'In attesa dello stato del runtime…'} />
+          ) : tab === 'live' ? (
+            <>
+              {/* Controlli */}
+              <div className="flex flex-col md:flex-row justify-between md:items-center gap-4 rounded-lg border border-white/5 bg-[#1A1C22]/80 p-5">
+                <div className="flex items-center gap-4 flex-wrap">
+                  <div>
+                    <div className="text-[10px] text-white/40 tracking-widest uppercase mb-1">Stato</div>
+                    <div className="flex items-center gap-2">
+                      <Badge text={live.status} className={live.isActive ? 'text-emerald-400 border-emerald-400/40 bg-emerald-400/10' : 'text-red-400 border-red-500/50 bg-red-500/10'} />
+                      {live.entryBlock && <span className="text-[11px] text-white/40 font-mono">ingressi bloccati: {live.entryBlock}</span>}
+                    </div>
+                  </div>
+                  <div className="text-[11px] text-white/40 font-mono leading-5">
+                    <div>ultima decisione: {utc(live.lastDecisionAt)}</div>
+                    <div>età dei dati: {live.dataAgeMs == null ? '—' : duration(live.dataAgeMs)}</div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-3">
+                  {live.paused ? (
+                    <button onClick={handleResume} className="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2.5 rounded font-bold text-[11px] tracking-widest uppercase">
+                      Riprendi ingressi
+                    </button>
+                  ) : (
+                    <button onClick={handlePause} className="border border-white/20 text-white/80 hover:bg-white/5 px-5 py-2.5 rounded font-bold text-[11px] tracking-widest uppercase">
+                      Pausa
+                    </button>
+                  )}
+                  {(opState === 'REDUCE_ONLY' || opState === 'HALTED') && (
+                    <button onClick={handleResumeRisk} className="border border-white/20 text-white/80 hover:bg-white/5 px-5 py-2.5 rounded font-bold text-[11px] tracking-widest uppercase">
+                      Riprendi ({opState})
+                    </button>
+                  )}
+                  {mode === 'shadow' && (
+                    <button onClick={handleReset} className={`border px-5 py-2.5 rounded font-bold text-[11px] tracking-widest uppercase ${resetConfirm ? 'bg-red-600 text-white border-red-600' : 'border-red-500/40 text-red-300 hover:bg-red-500/10'}`}>
+                      {resetConfirm ? 'Confermi il reset?' : 'Reset shadow'}
+                    </button>
+                  )}
+                  <button onClick={handleKillSwitch} className="bg-[#B91C1C] hover:bg-[#991B1B] text-white px-5 py-2.5 rounded font-bold text-[11px] tracking-widest uppercase border border-[#B91C1C]">
+                    Emergency Kill Switch
                   </button>
-                </form>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Emergency Halt Warning banner */}
-        {liveState?.status === 'ERROR_RECOVERING' && (
-          <div className="bg-red-500/10 border-b border-red-500/30 p-4 md:px-8 flex-shrink-0 relative overflow-hidden backdrop-blur-md">
-            <div className="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjgiPgo8cmVjdCB3aWR0aD0iOCIgaGVpZ2h0PSI4IiBmaWxsPSIjZmZmIiBmaWxsLW9wYWNpdHk9IjAuMDIiLz4KPC9zdmc+')] opacity-20 pointer-events-none mix-blend-overlay"></div>
-            <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div className="flex items-center gap-4">
-                <div className="relative flex items-center justify-center w-10 h-10 rounded-full bg-red-500/20 border border-red-500/40">
-                   <Shield className="text-red-500 w-5 h-5" />
-                   <div className="absolute inset-0 rounded-full border border-red-500 animate-ping opacity-30"></div>
-                </div>
-                <div>
-                  <h3 className="text-red-500 font-bold uppercase tracking-widest text-[13px] flex items-center gap-2 mb-0.5">
-                     SISTEMA FERMATO IN EMERGENZA
-                  </h3>
-                  <p className="text-red-400/80 text-[11px] font-mono tracking-wide leading-tight">{liveState?.lastError || 'Desync rilevato o errore irreversibile. Posizioni chiuse e trading sospeso per sicurezza.'}</p>
                 </div>
               </div>
-              <div className="flex gap-3">
-                 <button 
-                   onClick={handleResetLive}
-                   className="bg-[#1A1C22] hover:bg-red-500/10 text-red-400 border border-red-500/30 px-5 py-2 font-mono text-[10px] rounded transition-colors uppercase tracking-widest font-bold whitespace-nowrap"
-                 >
-                   {resetConfirm ? 'Confermi Reset?' : 'RESET GLOBALE'}
-                 </button>
-                 <button 
-                   onClick={handleStartLive}
-                   className="bg-red-500 hover:bg-red-600 text-white shadow-[0_0_15px_rgba(239,68,68,0.3)] shadow-red-500/20 border border-red-500 px-5 py-2 font-mono text-[10px] rounded transition-all uppercase tracking-widest font-bold whitespace-nowrap"
-                 >
-                   RIAVVIA TRADING
-                 </button>
+
+              {/* KPI */}
+              <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+                <Kpi label="PnL netto" value={signedUsd(metrics?.pnl.net)} sub={`${pct(metrics?.pnl.totalReturnPct)} sul capitale di ${usd(live.initialBalance)}`} tone={(metrics?.pnl.net ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'} />
+                <Kpi label="PnL realizzato" value={signedUsd(metrics?.pnl.realized)} sub={`non realizzato ${signedUsd(metrics?.pnl.unrealized)}`} />
+                <Kpi label="Margine impegnato" value={pct(live.balance > 0 ? (live.marginUsed / live.balance) * 100 : null, 1)} sub={usd(live.marginUsed)} />
+                <Kpi label="Posizioni aperte" value={String(live.openPositions.length)} sub={unprotected.length ? `${unprotected.length} senza stop confermato` : 'tutte protette'} tone={unprotected.length ? 'text-red-400' : 'text-white/90'} />
+                <Kpi label="Drawdown" value={pct(metrics?.drawdown.currentPct)} sub={`massimo ${pct(metrics?.drawdown.maxPct)}`} />
               </div>
-            </div>
-          </div>
-        )}
 
-        <main className="flex-1 overflow-y-auto custom-scrollbar p-4 md:p-6 lg:p-8 pb-20">
-          <AnimatePresence mode="wait">
-            {activeTab === 'live' ? (
-              <motion.div 
-                key="live"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                transition={{ duration: 0.3 }}
-                className="flex flex-col gap-6 w-full max-w-[1400px] mx-auto"
-              >
-                
-                {/* Session Header Controls */}
-                <div className="flex flex-col md:flex-row justify-between items-start md:items-center rounded-xl border border-white/5 bg-[#1A1C22]/80 backdrop-blur-md p-6 gap-6">
-                  <div className="flex items-center gap-6">
-                    <div>
-                      <div className="text-[10px] text-white/40 tracking-widest uppercase mb-1.5 font-mono">Current Session ID</div>
-                      <div className="text-xl md:text-2xl font-bold tracking-tight text-white/90">SESSION: {state.session}</div>
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+                {/* Equity */}
+                <Panel
+                  title="Equity del bot"
+                  className="lg:col-span-2 h-[340px]"
+                  right={
+                    <div className="flex gap-1 p-0.5 rounded border border-white/5 bg-black/20">
+                      {(['1D', '7D', '30D'] as const).map((r) => (
+                        <button key={r} onClick={() => setEquityRange(r)} className={`px-3 py-0.5 text-[10px] rounded ${equityRange === r ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white'}`}>
+                          {r}
+                        </button>
+                      ))}
                     </div>
-                    {liveState?.isActive ? (
-                      <div className={`px-4 py-1.5 rounded-full text-[11px] font-bold tracking-wider flex items-center gap-2 border ${liveState?.status === 'ERROR_RECOVERING' ? 'bg-[#FFB020]/10 text-[#FFB020] border-[#FFB020]/30' : 'bg-[#10B981]/10 text-[#10B981] border-[#10B981]/30'}`}>
-                        <div className={`w-2 h-2 rounded-full ${liveState?.status === 'ERROR_RECOVERING' ? 'bg-[#FFB020] animate-pulse' : 'bg-[#10B981]'}`}></div>
-                        {liveState?.status === 'ERROR_RECOVERING' ? 'RECOVERING' : 'HEALTHY'}
-                      </div>
-                    ) : (
-                      <div className="px-4 py-1.5 rounded-full text-[11px] font-bold tracking-wider flex items-center gap-2 border bg-rose-500/10 text-rose-500 border-rose-500/30">
-                        <div className="w-2 h-2 rounded-full bg-rose-500"></div>
-                        STOPPED
-                      </div>
-                    )}
-                  </div>
-                  
-                  <div className="flex flex-wrap items-center gap-4 w-full md:w-auto">
-                    {liveState?.isActive ? (
-                       <button 
-                         onClick={handleStopLive}
-                         className="flex-1 md:flex-none border border-[#F43F5E]/50 text-[#F43F5E] hover:bg-[#F43F5E]/10 px-6 py-3 rounded shadow-lg font-bold text-[11px] tracking-widest uppercase flex items-center justify-center gap-2 transition-all"
-                       >
-                          <span className="w-2 h-2 bg-current rounded-full"></span> STOP BOT
-                       </button>
-                    ) : (
-                       <button 
-                         onClick={handleStartLive}
-                         className="flex-1 md:flex-none bg-[#10B981] hover:bg-[#059669] text-white px-8 py-3 rounded shadow-lg shadow-[#10B981]/20 font-bold text-[11px] tracking-widest uppercase flex items-center justify-center gap-2 transition-all"
-                       >
-                          ▶ START BOT
-                       </button>
-                    )}
-                    {!liveState?.isActive && (
-                      <button 
-                        onClick={handleResetLive}
-                        className={`flex-1 md:flex-none border px-6 py-3 rounded font-bold text-[11px] tracking-widest uppercase flex items-center justify-center gap-2 transition-all ${resetConfirm ? 'bg-[#F43F5E] text-white border-[#F43F5E]' : 'border-[#F43F5E]/30 text-[#F43F5E]/80 hover:bg-[#F43F5E]/10 hover:text-[#F43F5E] hover:border-[#F43F5E]/60'}`}
-                      >
-                         {resetConfirm ? '↻ SEI SICURO?' : '↺ RESET SESSION'}
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* Metrics Grid */}
-                <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
-                  {/* PNL */}
-                  <div className="border border-white/5 bg-[#1A1C22]/80 backdrop-blur-md rounded-lg p-5 flex flex-col justify-between min-h-[130px]">
-                     <div className="flex justify-between items-start text-[10px] font-sans font-bold tracking-widest text-white/50 uppercase">
-                        <span>Net PnL</span>
-                        <Activity className="w-4 h-4 text-[#10B981]" />
-                     </div>
-                     <div className="pt-2">
-                        <div className={`text-2xl lg:text-3xl font-bold tracking-tight mb-0.5 font-sans ${liveState?.balance >= (liveState?.initialBalance || 10000) ? 'text-[#10B981]' : liveState?.balance < (liveState?.initialBalance || 10000) ? 'text-[#F43F5E]' : 'text-white'}`}>
-                          {liveState?.balance >= (liveState?.initialBalance || 10000) ? '+' : '-'}${Math.abs((liveState?.balance || (liveState?.initialBalance || 10000)) - (liveState?.initialBalance || 10000)).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
-                        </div>
-                        <div className={`text-[11px] font-medium ${(liveState?.balance || (liveState?.initialBalance || 10000)) >= (liveState?.initialBalance || 10000) ? 'text-[#10B981]/70' : 'text-[#F43F5E]/70'}`}>
-                          {liveState?.balance >= (liveState?.initialBalance || 10000) ? '+' : ''}{(((liveState?.balance || (liveState?.initialBalance || 10000)) - (liveState?.initialBalance || 10000)) / (liveState?.initialBalance || 10000) * 100).toFixed(2)}% since start
-                        </div>
-                     </div>
-                  </div>
-
-                  {/* Equity Change */}
-                  <div className="border border-white/5 bg-[#1A1C22]/80 backdrop-blur-md rounded-lg p-5 flex flex-col justify-between min-h-[130px]">
-                     <div className="flex justify-between items-start text-[10px] font-sans font-bold tracking-widest text-white/50 uppercase">
-                        <span>Equity % Change</span>
-                        <div className="w-4 h-4 flex items-end gap-[2px] justify-end opacity-70">
-                           <div className="w-1 h-1.5 border border-[#3B82F6]"></div>
-                           <div className="w-1 h-2.5 border border-[#3B82F6]"></div>
-                           <div className="w-1 h-3.5 border border-[#3B82F6]"></div>
-                        </div>
-                     </div>
-                     <div className="flex items-baseline gap-2 pt-2">
-                        <div className="text-[#3B82F6] text-2xl font-bold tracking-tight font-sans">
-                          {liveState?.balance >= (liveState?.initialBalance || 10000) ? '+' : ''}{(((liveState?.balance || 10000) - (liveState?.initialBalance || 10000)) / (liveState?.initialBalance || 10000) * 100).toFixed(2)}%
-                        </div>
-                        <div className="text-white/40 text-[10px] font-sans font-medium tracking-wide">
-                          Current Session
-                        </div>
-                     </div>
-                  </div>
-
-                  {/* Equity Engaged */}
-                  <div className="border border-white/5 bg-[#1A1C22]/80 backdrop-blur-md rounded-lg p-5 flex flex-col justify-between min-h-[130px]">
-                     <div className="flex justify-between items-start text-[10px] font-sans font-bold tracking-widest text-white/50 uppercase">
-                        <span>Equity Engaged</span>
-                        <div className="w-4 h-4 rounded-full border border-rose-400/50 flex items-center justify-center opacity-70">
-                          <div className="w-full h-[1px] bg-rose-400/50"></div>
-                        </div>
-                     </div>
-                     <div className="pt-2">
-                        <div className="text-white/90 text-2xl font-bold tracking-tight mb-0.5 font-sans">
-                          {(() => {
-                            const marginUsed = liveState?.marginUsed !== undefined ? liveState?.marginUsed : 
-                              (liveState?.openPositions?.reduce((sum: number, p: any) => 
-                                sum + ((p.size || p.contracts || 0) * (p.entryPrice || 0) / (p.leverage || 1)), 0) || 0);
-                            
-                            const utilization = (marginUsed / (liveState?.balance || 10000)) * 100;
-                            return `${utilization.toFixed(1)}%`;
-                          })()}
-                        </div>
-                        <div className="text-white/40 text-[11px] font-sans">Margin Utilization</div>
-                     </div>
-                  </div>
-
-                  {/* Open Positions */}
-                  <div className="border border-white/5 bg-[#1A1C22]/80 backdrop-blur-md rounded-lg p-5 flex flex-col justify-between min-h-[130px]">
-                     <div className="flex justify-between items-start text-[10px] font-sans font-bold tracking-widest text-white/50 uppercase">
-                        <span>Open Positions</span>
-                        <div className="w-4 h-4 border border-rose-400/50 rotate-45 flex items-center justify-center opacity-70">
-                          <div className="w-1.5 h-1.5 border border-rose-400/50"></div>
-                        </div>
-                     </div>
-                     <div className="pt-2">
-                        <div className="text-white/90 text-2xl font-bold tracking-tight mb-0.5 font-sans">
-                          {(liveState?.openPositions?.length || 0).toString().padStart(2, '0')}
-                        </div>
-                        <div className="text-white/40 text-[11px] font-sans">
-                          Notional: ${liveState?.openPositions?.reduce((sum: number, p: any) => sum + ((p.size || p.contracts || 0) * (p.entryPrice || 0)), 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
-                        </div>
-                     </div>
-                  </div>
-
-                  {/* Regime */}
-                  <div className="col-span-2 md:col-span-1 border border-white/5 bg-[#1A1C22]/80 backdrop-blur-md rounded-lg p-5 flex flex-col min-h-[130px]">
-                     <div className="flex justify-between items-start text-[10px] font-sans font-bold tracking-widest text-white/50 uppercase mb-2">
-                        <span>Current Cycle Regimes</span>
-                        <Hexagon className="w-4 h-4 text-[#10B981] opacity-70" />
-                     </div>
-                     <div className="flex-1 overflow-y-auto custom-scrollbar pr-1">
-                        {/* Global Regime */}
-                        <div className="flex justify-between items-center mb-1 bg-white/5 px-2 py-1 rounded">
-                           <span className="text-[10px] text-white/50 font-bold uppercase">GLOBAL (BTC)</span>
-                           <span className={`text-[11px] font-bold tracking-tight font-sans uppercase ${liveState?.regime === 'BULL' || liveState?.regime === 'EUPHORIA' ? 'text-[#10B981]' : liveState?.regime === 'BEAR' || liveState?.regime === 'CRASH' ? 'text-[#F43F5E]' : 'text-[#3B82F6]'}`}>
-                              {liveState?.regime || 'UNKNOWN'}
-                           </span>
-                        </div>
-                        {/* Local Regimes */}
-                        {liveState?.regimes && Object.entries(liveState?.regimes).map(([sym, reg]: [string, any]) => {
-                           const symParts = sym.split('/');
-                           const displaySym = symParts[0] || sym;
-                           return (
-                             <div key={sym} className="flex justify-between items-center mb-1 px-2 py-1 border-b border-white/5 last:border-0">
-                                <span className="text-[10px] text-white/40 font-bold">{displaySym}</span>
-                                <span className={`text-[10px] font-semibold tracking-tight uppercase ${reg === 'BULL' || reg === 'EUPHORIA' ? 'text-[#10B981]/80' : reg === 'BEAR' || reg === 'CRASH' ? 'text-[#F43F5E]/80' : 'text-[#3B82F6]/80'}`}>
-                                   {reg || 'UNKNOWN'}
-                                </span>
-                             </div>
-                           );
-                        })}
-                     </div>
-                  </div>
-                </div>
-
-                {/* Equity Chart */}
-                <div className="border border-white/5 bg-[#1A1C22]/80 backdrop-blur-md rounded-lg overflow-hidden flex flex-col h-[400px]">
-                  <div className="px-6 py-4 flex flex-col sm:flex-row items-start sm:items-center justify-between border-b border-white/5 gap-3">
-                    <div className="flex items-center gap-3">
-                      <span className="font-bold text-xs tracking-widest uppercase text-white/90 font-sans">Equity Chart</span>
-                      <span className="text-[10px] tracking-widest text-white/30 font-sans">SESSION REAL-TIME</span>
+                  }
+                >
+                  {equityData.length < 2 ? (
+                    <Empty text="Nessun punto di equity ancora (uno per ogni chiusura oraria)." />
+                  ) : (
+                    <div className="flex-1 pt-4 pr-4">
+                      <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
+                        <AreaChart data={equityData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+                          <defs>
+                            <linearGradient id="eq" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.35} />
+                              <stop offset="95%" stopColor="#3B82F6" stopOpacity={0} />
+                            </linearGradient>
+                          </defs>
+                          <XAxis dataKey="t" type="number" scale="time" domain={['dataMin', 'dataMax']} tickFormatter={(v) => new Date(v).toISOString().slice(5, 16).replace('T', ' ')} stroke="rgba(255,255,255,0.05)" tick={{ fill: 'rgba(255,255,255,0.3)', fontSize: 10 }} tickLine={false} axisLine={false} height={20} />
+                          <YAxis domain={['auto', 'auto']} tickFormatter={(v) => `$${Math.round(v).toLocaleString('en-US')}`} stroke="rgba(255,255,255,0.05)" tick={{ fill: 'rgba(255,255,255,0.3)', fontSize: 10 }} width={70} tickLine={false} axisLine={false} />
+                          <Tooltip contentStyle={{ backgroundColor: '#111216', borderColor: 'rgba(255,255,255,0.1)', fontSize: 12 }} formatter={(v: number) => [usd(v), 'Equity']} labelFormatter={(l) => utc(l as number)} />
+                          <Area type="monotone" dataKey="equity" stroke="#93C5FD" strokeWidth={2} fill="url(#eq)" isAnimationActive={false} />
+                        </AreaChart>
+                      </ResponsiveContainer>
                     </div>
-                    <div className="flex gap-1.5 p-1 rounded-md border border-white/5 bg-black/20">
-                       <button onClick={() => setEquityTimeframe('1H')} className={`px-4 py-1 text-[10px] font-sans font-medium rounded transition-colors ${equityTimeframe === '1H' ? 'bg-white/10 text-white' : 'text-white/40 hover:bg-white/5 hover:text-white'}`}>1H</button>
-                       <button onClick={() => setEquityTimeframe('4H')} className={`px-4 py-1 text-[10px] font-sans font-medium rounded transition-colors ${equityTimeframe === '4H' ? 'bg-white/10 text-white' : 'text-white/40 hover:bg-white/5 hover:text-white'}`}>4H</button>
-                       <button onClick={() => setEquityTimeframe('1D')} className={`px-4 py-1 text-[10px] font-sans font-medium rounded transition-colors ${equityTimeframe === '1D' ? 'bg-white/10 text-white' : 'text-white/40 hover:bg-white/5 hover:text-white'}`}>1D</button>
-                    </div>
-                  </div>
-                  <div className="flex-1 w-full pt-6 pr-4">
-                    <ResponsiveContainer minWidth={0} minHeight={0} width="100%" height="100%">
-                      <AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                        <defs>
-                          <linearGradient id="colorEq" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.4}/>
-                            <stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/>
-                          </linearGradient>
-                        </defs>
-                        <XAxis 
-                          dataKey="timestamp" 
-                          type="number" 
-                          scale="time" 
-                          domain={['auto', 'auto']}
-                          tickFormatter={(val) => new Date(val).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                          stroke="rgba(255,255,255,0.05)"
-                          tickLine={false}
-                          axisLine={false}
-                          height={20}
-                          tick={{fill: 'rgba(255,255,255,0.3)', fontSize: 10, fontFamily: 'sans-serif'}}
-                        />
-                        <YAxis 
-                          domain={['auto', 'auto']} 
-                          stroke="rgba(255,255,255,0.05)" 
-                          tick={{fill: 'rgba(255,255,255,0.2)', fontSize: 10, fontFamily: 'sans-serif', fontWeight: 600}}
-                          tickFormatter={(val) => `$${(val/1000).toFixed(0)}K`}
-                          width={60}
-                          tickLine={false}
-                          axisLine={false}
-                          tickMargin={10}
-                        />
-                        <Tooltip 
-                          contentStyle={{ backgroundColor: '#111216', borderColor: 'rgba(255,255,255,0.1)', color: '#fff', fontSize: '12px', fontFamily: 'sans-serif', borderRadius: '4px' }}
-                          itemStyle={{ color: '#3B82F6', fontWeight: 600 }}
-                          formatter={(val: number) => [`$${val.toFixed(2)}`, 'Equity']}
-                          labelFormatter={(label) => new Date(label).toLocaleTimeString()}
-                        />
-                        {(referenceLines || []).map((ref, idx) => (
-                          <ReferenceLine 
-                            key={idx} 
-                            x={ref.time} 
-                            stroke={ref.color} 
-                            strokeOpacity={0.2} 
-                            strokeDasharray="3 3"
-                          />
-                        ))}
-                        {/* Horizontal Grid lines simulation */}
-                        {[10000, 11000, 12000, 13000].map((val) => (
-                          <ReferenceLine key={val} y={val} stroke="rgba(255,255,255,0.05)" strokeDasharray="3 3" />
-                        ))}
-                        <Area 
-                          type="monotone" 
-                          dataKey="equity" 
-                          stroke="#93C5FD" 
-                          strokeWidth={2}
-                          fillOpacity={1} 
-                          fill="url(#colorEq)" 
-                          isAnimationActive={true}
-                        />
-                      </AreaChart>
-                   </ResponsiveContainer>
-                  </div>
-                </div>
+                  )}
+                </Panel>
 
-                {/* Active Trades Table */}
-                <div className="border border-white/5 bg-[#1A1C22]/80 backdrop-blur-md rounded-lg overflow-hidden flex flex-col">
-                  <div className="px-6 py-4 border-b border-white/5 flex items-center justify-between">
-                    <span className="font-bold text-xs tracking-widest uppercase text-white/90 font-sans">Active Trades</span>
-                    <span className="text-[10px] tracking-widest text-white/40 font-sans uppercase">
-                      TOTAL EXPOSURE: {liveState?.openPositions?.map((p:any)=>`${(p.size || p.contracts || 0).toFixed(2)} ${(p.symbol||'').split('/')[0]}`).join(' • ') || '0.00 BTC'}
-                    </span>
-                  </div>
-                  <div className="p-0 overflow-x-auto">
-                    {(!liveState?.openPositions || liveState?.openPositions.length === 0) ? (
-                      <div className="p-16 flex flex-col items-center justify-center text-white/20 font-sans text-sm">
-                         No Active Positions found
-                      </div>
-                    ) : (
-                      <table className="w-full text-left font-sans text-[11px] whitespace-nowrap">
-                        <thead className="text-white/30 text-[10px] font-bold tracking-widest border-b border-white/5">
-                          <tr>
-                            <th className="px-6 py-4 font-normal uppercase">Symbol</th>
-                            <th className="px-6 py-4 font-normal uppercase">Side</th>
-                            <th className="px-6 py-4 font-normal uppercase">Leverage</th>
-                            <th className="px-6 py-4 font-normal uppercase">Size</th>
-                            <th className="px-6 py-4 font-normal uppercase">Entry Price</th>
-                            <th className="px-6 py-4 font-normal uppercase">Trailing Stop</th>
-                            <th className="px-6 py-4 font-normal uppercase">% Trailing</th>
-                            <th className="px-6 py-4 font-normal uppercase text-right">Unrealized PNL</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {liveState?.openPositions.map((p: any, i: number) => {
-                            const isLong = p.direction === 'LONG';
-                            const trlDistPercent = Math.abs((p.currentStopLoss - p.entryPrice) / p.entryPrice * 100).toFixed(2);
-                            return (
-                            <tr key={i} className="border-b border-white/5 hover:bg-white/[0.02] transition-colors">
-                              <td className="px-6 py-5 text-white/90 font-semibold">{p.symbol.replace('/','-')}</td>
-                              <td className="px-6 py-5">
-                                  <span className={`px-2 py-1 rounded border text-[9px] tracking-widest uppercase font-bold ${isLong ? 'bg-transparent text-[#10B981] border-[#10B981]/50' : 'bg-transparent text-[#F43F5E] border-[#F43F5E]/50'}`}>
-                                     {p.direction}
-                                  </span>
-                              </td>
-                              <td className="px-6 py-5 text-white/50">{p.leverage || 1}.0x</td>
-                              <td className="px-6 py-5 text-white/90 font-medium">{(p.size || p.contracts || 0).toFixed(2)} {p.symbol.split('/')[0]}</td>
-                              <td className="px-6 py-5 text-white/70 font-medium">${p.entryPrice?.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}</td>
-                              <td className="px-6 py-5 text-[#F43F5E] font-medium">${p.currentStopLoss?.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}</td>
-                              <td className="px-6 py-5 text-white/50">{trlDistPercent}%</td>
-                              <td className={`px-6 py-5 text-right font-bold tracking-tight ${p.unrealizedPnl >= 0 ? 'text-[#10B981]' : 'text-[#F43F5E]'}`}>
-                                {p.unrealizedPnl >= 0 ? '+' : '-'}${Math.abs(p.unrealizedPnl || 0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}
-                              </td>
-                            </tr>
-                          )})}
-                        </tbody>
-                      </table>
-                    )}
-                  </div>
-                </div>
-
-                {/* Recent Trades Table */}
-                <div className="border border-white/5 bg-[#1A1C22]/80 backdrop-blur-md rounded-lg overflow-hidden flex flex-col mt-2">
-                  <div className="px-6 py-4 border-b border-white/5 flex items-center justify-between">
-                    <span className="font-bold text-xs tracking-widest uppercase text-white/90 font-sans">Trade History</span>
-                    <span className="text-[10px] tracking-widest text-white/40 font-sans uppercase">
-                      LAST 50 TRADES
-                    </span>
-                  </div>
-                  <div className="p-0 overflow-x-auto max-h-[400px] overflow-y-auto custom-scrollbar">
-                    {(!(liveState?.closedTrades || liveState?.recentTrades) || (liveState?.closedTrades || liveState?.recentTrades).length === 0) ? (
-                      <div className="p-16 flex flex-col items-center justify-center text-white/20 font-sans text-sm">
-                         No recent trades found
-                      </div>
-                    ) : (
-                      <table className="w-full text-left font-sans text-[11px] whitespace-nowrap">
-                        <thead className="text-white/30 text-[10px] font-bold tracking-widest border-b border-white/5 sticky top-0 bg-[#1A1C22]">
-                          <tr>
-                            <th className="px-6 py-4 font-normal uppercase">Time</th>
-                            <th className="px-6 py-4 font-normal uppercase">Symbol</th>
-                            <th className="px-6 py-4 font-normal uppercase">Side</th>
-                            <th className="px-6 py-4 font-normal uppercase">Entry Price</th>
-                            <th className="px-6 py-4 font-normal uppercase">Exit Price</th>
-                            <th className="px-6 py-4 font-normal uppercase">Reason</th>
-                            <th className="px-6 py-4 font-normal uppercase text-right">Realized PNL</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {(liveState?.closedTrades || liveState?.recentTrades).map((t: any, i: number) => {
-                            const isLong = t.side === 'LONG';
-                            const isWin = t.pnl > 0;
-                            return (
-                            <tr key={i} className="border-b border-white/5 hover:bg-white/[0.02] transition-colors">
-                              <td className="px-6 py-5 text-white/50">{new Date(t.time).toLocaleString([], { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</td>
-                              <td className="px-6 py-5 text-white/90 font-semibold">{t.symbol.replace('/','-')}</td>
-                              <td className="px-6 py-5">
-                                  <span className={`px-2 py-1 rounded border text-[9px] tracking-widest uppercase font-bold ${isLong ? 'bg-transparent text-[#10B981] border-[#10B981]/50' : 'bg-transparent text-[#F43F5E] border-[#F43F5E]/50'}`}>
-                                     {t.side}
-                                  </span>
-                              </td>
-                              <td className="px-6 py-5 text-white/70 font-medium">${t.entry?.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}</td>
-                              <td className="px-6 py-5 text-white/70 font-medium">${t.exit?.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}</td>
-                              <td className="px-6 py-5 text-white/50 text-[9px] tracking-wider uppercase">{t.reason}</td>
-                              <td className={`px-6 py-5 text-right font-bold tracking-tight ${isWin ? 'text-[#10B981]' : 'text-[#F43F5E]'}`}>
-                                {isWin ? '+' : '-'}${Math.abs(t.pnl || 0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}
-                              </td>
-                            </tr>
-                          )})}
-                        </tbody>
-                      </table>
-                    )}
-                  </div>
-                </div>
-
-                {/* Bot Decisions / Logic Log */}
-                <div className="border border-white/5 bg-[#1A1C22]/80 backdrop-blur-md rounded-lg overflow-hidden flex flex-col mt-2">
-                  <div className="px-6 py-4 border-b border-white/5 flex items-center justify-between">
-                    <span className="font-bold text-xs tracking-widest uppercase text-white/90 font-sans">Decisioni & Logica</span>
-                    <span className="text-[10px] tracking-widest text-white/40 font-sans uppercase">
-                      LATEST ENGINE LOGS
-                    </span>
-                  </div>
-                  <div className="p-0 overflow-x-auto max-h-[300px] overflow-y-auto custom-scrollbar">
-                    {(!liveState?.recentDecisions || liveState?.recentDecisions.length === 0) ? (
-                      <div className="p-16 flex flex-col items-center justify-center text-white/20 font-sans text-sm">
-                         Nessuna decisione recente
-                      </div>
-                    ) : (
-                      <table className="w-full text-left font-sans text-[11px] whitespace-nowrap">
-                        <thead className="text-white/30 text-[10px] font-bold tracking-widest border-b border-white/5 sticky top-0 bg-[#1A1C22]">
-                          <tr>
-                            <th className="px-6 py-4 font-normal uppercase">Time</th>
-                            <th className="px-6 py-4 font-normal uppercase">Symbol</th>
-                            <th className="px-6 py-4 font-normal uppercase">Action</th>
-                            <th className="px-6 py-4 font-normal uppercase">Direction</th>
-                            <th className="px-6 py-4 font-normal uppercase">Reason</th>
-                            <th className="px-6 py-4 font-normal uppercase">Price / Regime</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {liveState?.recentDecisions.map((d: any, i: number) => {
-                            const isExecuted = d.action === 'TRADE_EXECUTED';
-                            const isSk = d.action.includes('SKIPPED');
-                            let actionColor = 'text-white/70';
-                            if (isExecuted) actionColor = 'text-[#10B981] font-bold';
-                            else if (isSk) actionColor = 'text-[#F43F5E]';
-                            else actionColor = 'text-[#FFB020]'; // BLOCKED
-
-                            return (
-                            <tr key={i} className="border-b border-white/5 hover:bg-white/[0.02] transition-colors">
-                              <td className="px-6 py-4 text-white/50">{new Date(d.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</td>
-                              <td className="px-6 py-4 text-white/90 font-semibold">{d.symbol?.replace('/','-')}</td>
-                              <td className={`px-6 py-4 ${actionColor}`}>{d.action}</td>
-                              <td className="px-6 py-4">
-                                  {d.direction ? (
-                                    <span className={`px-2 py-1 rounded border text-[9px] tracking-widest uppercase font-bold ${d.direction === 'LONG' ? 'bg-transparent text-[#10B981] border-[#10B981]/50' : 'bg-transparent text-[#F43F5E] border-[#F43F5E]/50'}`}>
-                                       {d.direction}
-                                    </span>
-                                  ) : '-'}
-                              </td>
-                              <td className="px-6 py-4 text-white/70 font-medium max-w-[300px] truncate" title={d.reason}>{d.reason}</td>
-                              <td className="px-6 py-4 text-white/50">{d.price ? `$${d.price.toFixed(2)}` : '-'} {d.regime ? `(${d.regime})` : ''}</td>
-                            </tr>
-                          )})}
-                        </tbody>
-                      </table>
-                    )}
-                  </div>
-                </div>
-
-              </motion.div>
-            ) : (
-                            <motion.div 
-                 key="metrics"
-                 initial={{ opacity: 0, scale: 0.98 }}
-                 animate={{ opacity: 1, scale: 1 }}
-                 exit={{ opacity: 0, scale: 0.98 }}
-                 transition={{ duration: 0.3 }}
-                 className="flex flex-col w-full max-w-[1400px] mx-auto gap-4 pb-10"
-              >
-                {/* Header Section */}
-                <div className="flex flex-col md:flex-row items-start md:items-end justify-between pb-2 gap-4">
-                  <div className="flex flex-col">
-                    <h2 className="font-sans font-bold text-[22px] tracking-wide text-[#93C5FD] mb-1 uppercase drop-shadow-md">Quantitative Strategy Analysis</h2>
-                    <p className="font-sans text-[10px] tracking-widest text-white/30 uppercase">Instance: ARB_K_OMEGA_9 | Last Update: 14:02:11 UTC</p>
-                  </div>
-                  <div className="flex gap-2">
-                    <button 
-                      onClick={() => {
-                        if (!metrics) return;
-                        const output = JSON.stringify(metrics, null, 2);
-                        const blob = new Blob([output], { type: 'text/plain' });
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = `arbiter_metrics_${new Date().toISOString().slice(0, 10)}.txt`;
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                        URL.revokeObjectURL(url);
-                      }}
-                      className="px-4 py-2 flex items-center gap-2 rounded border border-white/10 text-white/80 hover:bg-white/5 hover:text-white text-[11px] font-bold tracking-widest uppercase transition-colors"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      Export Metrics (CSV)
-                    </button>
-                    <button className="px-4 py-2 flex items-center gap-2 rounded border border-white/10 text-white/80 hover:bg-white/5 hover:text-white text-[11px] font-bold tracking-widest uppercase transition-colors">
-                      <FileText className="w-3.5 h-3.5" />
-                      PDF
-                    </button>
-                  </div>
-                </div>
-
-                {/* Metrics Group style */}
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                {(() => {
-                  const groups = [
-                    {
-                      title: '01 // PURE RETURN',
-                      icon: <TrendingUp className="w-3.5 h-3.5 text-[#10B981]" />,
-                      items: [
-                        { label: 'Total Return', key: 'totalReturn', fmt: (v: number) => `${(v * 100).toFixed(2)}%`, polarity: true },
-                        { label: 'CAGR', key: 'cagr', fmt: (v: number) => `${(v * 100).toFixed(2)}%`, polarity: true },
-                        { label: 'Net Profit', key: 'netProfit', fmt: (v: number) => `$${v.toFixed(2)}`, polarity: true, defaultColor: 'text-[#93C5FD]' },
-                        { label: 'Avg Trade', key: 'avgTrade', fmt: (v: number) => `$${v.toFixed(2)}`, polarity: true, defaultColor: 'text-[#93C5FD]' },
-                      ]
-                    },
-                    {
-                      title: '02 // RISK-ADJUSTED RETURN',
-                      icon: <Shield className="w-3.5 h-3.5 text-[#F43F5E]" />,
-                      items: [
-                        { label: 'Max Drawdown', key: 'maxDD', fmt: (v: number) => `${(v * 100).toFixed(2)}%`, polarity: false },
-                        { label: 'Sharpe Ratio', key: 'sharpe', fmt: (v: number) => v.toFixed(2), polarity: true },
-                        { label: 'Sortino Ratio', key: 'sortino', fmt: (v: number) => v.toFixed(2), polarity: true },
-                        { label: 'Calmar Ratio', key: 'calmar', fmt: (v: number) => v.toFixed(1), polarity: true, defaultColor: 'text-[#93C5FD]' },
-                        { label: 'Ulcer Index', key: 'ulcerIndex', fmt: (v: number) => v.toFixed(3), polarity: false, defaultColor: 'text-white/40' },
-                      ]
-                    },
-                    {
-                      title: '03 // OPERATIONAL QUALITY',
-                      icon: <Sliders className="w-3.5 h-3.5 text-white/50" />,
-                      items: [
-                        { label: 'Trades Count', key: 'tradesCount', fmt: (v: number) => v.toFixed(1), polarity: true, defaultColor: 'text-white/70' },
-                        { label: 'Profit Factor', key: 'profitFactor', fmt: (v: number) => v.toFixed(2), polarity: true, defaultColor: 'text-[#10B981]' },
-                        { label: 'Hit Rate', key: 'hitRate', fmt: (v: number) => `${(v * 100).toFixed(1)}%`, polarity: false, defaultColor: 'text-[#10B981]' },
-                        { label: 'Expectancy', key: 'expectancy', fmt: (v: number) => v.toFixed(2), polarity: true, defaultColor: 'text-[#93C5FD]' },
-                        { label: 'Avg Win/Loss', key: 'winLossRatio', fmt: (v: number) => `${v.toFixed(1)}:1`, polarity: true },
-                      ]
-                    },
-                    {
-                      title: '04 // RETURN ROBUSTNESS',
-                      icon: <GitBranch className="w-3.5 h-3.5 text-[#10B981]" />,
-                      items: [
-                        { label: 'Recovery Factor', key: 'recoveryFactor', fmt: (v: number) => v.toFixed(2), polarity: true, defaultColor: 'text-[#10B981]' },
-                        { label: 'Time Under Water', key: 'timeUnderWater', fmt: (v: number) => `${Math.floor(v/60)}h ${Math.floor(v%60)}m`, polarity: false, defaultColor: 'text-white/70' },
-                        { label: 'Max DD Duration', key: 'maxDDDuration', fmt: (v: number) => `${Math.floor(v/60)}m ${(v%60).toFixed(0).padStart(2,'0')}s`, polarity: false, defaultColor: 'text-[#F43F5E]' },
-                        { label: 'Current Regime', key: 'currentRegime', fmt: (v: string) => v, polarity: false, defaultColor: 'text-[#93C5FD]' },
-                        { label: 'Out-of-sample perf.', key: 'oosPerformance', fmt: (v: string) => v, polarity: false, defaultColor: 'text-[#10B981]' },
-                      ]
-                    }
-                  ];
-
-                  return groups.map((group, groupIdx) => (
-                    <div key={groupIdx} className="bg-[#1A1C22]/80 border border-white/10 rounded-md overflow-hidden flex flex-col backdrop-blur-md">
-                      <div className="px-5 py-3.5 border-b border-white/5 text-[11px] font-bold tracking-widest text-[#93C5FD] uppercase font-sans flex items-center justify-between">
-                        <span>{group.title}</span>
-                        {group.icon}
-                      </div>
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-left font-sans whitespace-nowrap">
-                          <thead className="text-white/30 text-[10px] font-bold uppercase tracking-widest border-b border-white/5">
-                            <tr>
-                              <th className="px-5 py-3 font-normal">Metric</th>
-                              <th className="px-5 py-3 font-normal text-right">Current (T0)</th>
-                              <th className="px-5 py-3 font-normal text-right">Prev (T-15m)</th>
-                              <th className="px-5 py-3 font-normal text-right">24h (T-24h)</th>
-                            </tr>
-                          </thead>
-                          <tbody className="text-[12px] font-mono">
-                            {group.items.map((item: any, i: number) => {
-                              const v0 = (metrics?.t0 as any)?.[item.key] ?? '-';
-                              const v1 = (metrics?.t1 as any)?.[item.key] ?? '-';
-                              const v24 = (metrics?.t24h as any)?.[item.key] ?? '-';
-                              
-                              const renderVal = (v: any) => {
-                                if (v === '-' || v === undefined || v === null) return <span className="text-white/20">-</span>;
-                                if (v === 'N/A') return <span className="text-white/40">N/A</span>;
-                                
-                                let formattedStr = '';
-                                try {
-                                  formattedStr = item.fmt(v);
-                                } catch(e) {
-                                  formattedStr = String(v);
-                                }
-
-                                if (typeof v === 'string') return <span className="text-white/80">{formattedStr}</span>;
-                                
-                                let colorClass = 'text-white/80';
-                                if (item.defaultColor) {
-                                  colorClass = item.defaultColor;
-                                } else {
-                                  if (item.polarity) {
-                                    colorClass = v > 0 ? 'text-[#10B981]' : v < 0 ? 'text-[#F43F5E]' : 'text-white/50';
-                                  } else {
-                                    colorClass = v > 0 ? 'text-[#F43F5E]' : v < 0 ? 'text-[#10B981]' : 'text-white/50';
-                                  }
-                                }
-                                return <span className={`font-semibold ${colorClass}`}>{formattedStr}</span>;
-                              };
-
-                              return (
-                                <tr key={i} className="hover:bg-white/[0.02]">
-                                  <td className="px-5 py-3 text-white/90 font-sans font-medium">{item.label}</td>
-                                  <td className="px-5 py-3 text-right font-medium">{renderVal(v0)}</td>
-                                  <td className="px-5 py-3 text-right font-medium">{renderVal(v1)}</td>
-                                  <td className="px-5 py-3 text-right font-medium">{renderVal(v24)}</td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  ));
-                })()}
-                </div>
-
-                {/* Bottom Section */}
-                <div className="flex justify-center w-full mt-4 h-full min-h-[240px]">
-                  {/* Status Box */}
-                  <div className="bg-[#1A1C22]/80 border border-white/10 rounded-md flex flex-col justify-between backdrop-blur-md p-6 max-w-md w-full">
-                    <div className="flex flex-col items-center justify-center pt-2">
-                       <span className="text-[10px] text-white/30 uppercase tracking-widest font-sans font-bold mb-2">Current Status</span>
-                       <span className="text-3xl font-bold font-sans tracking-tight text-[#10B981] drop-shadow-[0_0_15px_rgba(16,185,129,0.3)]">OPERATIONAL</span>
-                    </div>
-
-                    <div className="flex flex-col gap-3 mt-8 w-full text-[10px] font-sans border-t border-white/5 pt-6">
-                      <div className="flex justify-between items-center w-full">
-                         <span className="text-white/40 tracking-widest uppercase font-bold">Exchange Link</span>
-                         <span className={`${liveState?.krakenStatus?.connected ? 'text-[#10B981]' : 'text-[#F43F5E]'} font-mono text-[11px] font-medium`}>
-                            {liveState?.krakenStatus?.connected ? 'CONNECTED' : 'DISCONNECTED'}
-                         </span>
-                      </div>
-                      {liveState?.krakenStatus?.lastError && (
-                        <div className="text-[#F43F5E]/60 text-[9px] font-mono break-words mb-1 max-h-12 overflow-y-auto">
-                          Error: {liveState?.krakenStatus?.lastError}
-                        </div>
+                {/* Health */}
+                <Panel
+                  title="Salute del runtime"
+                  right={health ? health.healthy ? <Badge text="Sano" className="text-emerald-400 border-emerald-400/40 bg-emerald-400/10" /> : <Badge text="Problemi" className="text-red-400 border-red-500/50 bg-red-500/10" /> : null}
+                >
+                  {!health ? (
+                    <Empty text="In attesa dell'health…" />
+                  ) : (
+                    <div className="px-5 py-3">
+                      <Row label="Runtime" value={`${health.runtimeStatus} · ${health.operationalState}`} />
+                      <Row label="Lease" value={health.lease.valid ? `valido (epoch ${health.lease.epoch}, scade ${hhmm(health.lease.expiresAt)})` : `NON valido: ${health.lease.reason}`} tone={health.lease.valid ? 'text-white/85' : 'text-red-400'} />
+                      <Row label="Ultima candela" value={health.data.lastSlot ? `${utc(health.data.lastSlot)} (${duration(health.data.ageMs)} fa)` : 'nessuna'} tone={health.data.stale ? 'text-red-400' : 'text-white/85'} />
+                      <Row label="Heartbeat" value={health.heartbeat ? (health.heartbeat.healthy ? `ok · protezione ${hhmm(health.heartbeat.lastProtectionAt)}` : health.heartbeat.issues.join('; ')) : '—'} tone={health.heartbeat && !health.heartbeat.healthy ? 'text-red-400' : 'text-white/85'} />
+                      <Row label="Posizioni protette" value={health.allProtected ? 'tutte' : 'NO'} tone={health.allProtected ? 'text-emerald-400' : 'text-red-400'} />
+                      <Row label="Scritture archivio oggi" value={`${health.persistence.writes.writes} / ${health.persistence.writes.budget}`} />
+                      <Row label="Cicli" value={`${health.cycles.decisionTicks} decisioni · ${health.cycles.protectionTicks} protezione · ${health.cycles.failedTicks} falliti`} />
+                      <div className="mt-3 text-[10px] font-bold tracking-widest text-white/40 uppercase">Errori recenti</div>
+                      {health.recentErrors.length === 0 ? (
+                        <div className="text-[11px] text-white/30 py-1">nessuno</div>
+                      ) : (
+                        <ul className="max-h-[110px] overflow-y-auto text-[11px] font-mono space-y-1 mt-1">
+                          {health.recentErrors.slice(0, 8).map((e: Json, i: number) => (
+                            <li key={i} className={LEVEL_STYLE[e.level === 'error' ? 'critical' : e.level] ?? 'text-white/60'}>
+                              {hhmm(e.at)} {e.code ? `${e.code}: ` : ''}
+                              {e.message}
+                            </li>
+                          ))}
+                        </ul>
                       )}
-                      <div className="flex justify-between items-center w-full">
-                         <span className="text-white/40 tracking-widest uppercase font-bold">Last Engine Tick</span>
-                         <span className="text-white/90 font-mono text-[11px] font-medium">
-                            {liveState?.lastUpdate ? new Date(liveState?.lastUpdate).toLocaleTimeString() : 'N/A'}
-                         </span>
-                      </div>
-                      <div className="flex justify-between items-center w-full">
-                         <span className="text-white/40 tracking-widest uppercase font-bold">Session Start</span>
-                         <span className="text-white/90 font-mono text-[11px] font-medium">
-                            {liveState?.startTime ? new Date(liveState?.startTime).toLocaleString() : 'N/A'}
-                         </span>
-                      </div>
-                      <div className="flex justify-between items-center w-full">
-                         <span className="text-white/40 tracking-widest uppercase font-bold">Sharpe Ratio</span>
-                         <span className="text-[#10B981] font-mono text-[11px] font-medium">
-                            {typeof metrics?.t0?.sharpe === 'number' ? metrics.t0.sharpe.toFixed(2) : 'N/A'}
-                         </span>
-                      </div>
-                      <div className="flex justify-between items-center w-full">
-                         <span className="text-white/40 tracking-widest uppercase font-bold">Profit Factor</span>
-                         <span className="text-white/90 font-mono text-[11px] font-medium">
-                            {metrics?.t0?.profitFactor?.toFixed(2) || '0.00'}
-                         </span>
-                      </div>
                     </div>
+                  )}
+                </Panel>
+              </div>
 
-                    <button 
-                      onClick={() => {
-                        handleKillSwitch();
-                        setActiveTab('live');
-                      }}
-                      className="w-full bg-[#B91C1C] hover:bg-[#991B1B] text-white rounded font-bold text-[10px] tracking-widest uppercase py-3.5 mt-6 transition-colors border border-[#B91C1C] shadow-[0_0_15px_rgba(185,28,28,0.2)]"
-                    >
-                      Emergency Kill Switch
-                    </button>
-                    {(liveState?.operationalState === 'REDUCE_ONLY' || liveState?.operationalState === 'HALTED') && (
-                      <button
-                        onClick={handleResumeRisk}
-                        className="w-full bg-transparent hover:bg-white/5 text-white/80 rounded font-bold text-[10px] tracking-widest uppercase py-3 mt-3 transition-colors border border-white/20"
-                      >
-                        Riprendi ({liveState?.operationalState})
-                      </button>
-                    )}
+              {/* Posizioni */}
+              <Panel title="Posizioni aperte" right={<span className="text-[10px] text-white/40 font-mono">stop della strategia alla chiusura 1H · stop nativo su Kraken</span>}>
+                {live.openPositions.length === 0 ? (
+                  <Empty text="Nessuna posizione aperta." />
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-[12px] whitespace-nowrap">
+                      <thead className="text-white/35 text-[10px] tracking-widest uppercase border-b border-white/5">
+                        <tr>
+                          {['Simbolo', 'Lato', 'Leva', 'Size', 'Ingresso', 'Ultimo', 'Stop strategia', 'Stop nativo', 'Protezione', 'PnL non realizzato'].map((h) => (
+                            <th key={h} className="px-4 py-3 font-normal">
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {live.openPositions.map((p: Json) => {
+                          const [label, style] = PROTECTION[p.protection] ?? [p.protection, 'text-white/60 border-white/20'];
+                          return (
+                            <tr key={p.id} className="border-b border-white/5">
+                              <td className="px-4 py-3 font-semibold text-white/90">{p.symbol}</td>
+                              <td className="px-4 py-3">
+                                <Badge text={p.direction} className={p.direction === 'LONG' ? 'text-emerald-400 border-emerald-400/40' : 'text-red-400 border-red-500/40'} />
+                              </td>
+                              <td className="px-4 py-3 text-white/60">{num(p.leverage, 1)}x</td>
+                              <td className="px-4 py-3">{size(p.size)}</td>
+                              <td className="px-4 py-3">{price(p.entryPrice)}</td>
+                              <td className="px-4 py-3">{price(p.lastPrice)}</td>
+                              <td className="px-4 py-3 text-red-300">{price(p.currentStopLoss)}</td>
+                              <td className="px-4 py-3 text-red-300">{price(p.nativeStopLevel)}</td>
+                              <td className="px-4 py-3">
+                                <Badge text={label} className={style} />
+                              </td>
+                              <td className={`px-4 py-3 font-semibold ${p.unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{signedUsd(p.unrealizedPnl)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
                   </div>
+                )}
+              </Panel>
 
-                </div>
+              <Panel title="Trade chiusi" right={<span className="text-[10px] text-white/40">{live.closedTrades.length} più recenti</span>}>
+                  {live.closedTrades.length === 0 ? (
+                    <Empty text="Nessun trade chiuso." />
+                  ) : (
+                    <div className="overflow-auto max-h-[360px]">
+                      <table className="w-full text-left text-[12px] whitespace-nowrap">
+                        <thead className="text-white/35 text-[10px] tracking-widest uppercase border-b border-white/5 sticky top-0 bg-[#1A1C22]">
+                          <tr>
+                            {['Chiuso', 'Simbolo', 'Lato', 'Prezzo ingresso', 'Prezzo uscita', 'Motivo', 'PnL', 'Fee'].map((h, i) => (
+                              <th key={i} className="px-4 py-2.5 font-normal">
+                                {h}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {live.closedTrades.map((t: Json, i: number) => (
+                            <tr key={i} className="border-b border-white/5">
+                              <td className="px-4 py-2.5 text-white/50">{utc(t.exitTime)}</td>
+                              <td className="px-4 py-2.5 font-semibold">{t.symbol.split('/')[0]}</td>
+                              <td className="px-4 py-2.5">{t.type}</td>
+                              <td className="px-4 py-2.5">{price(t.entryPrice)}</td>
+                              <td className="px-4 py-2.5">{price(t.exitPrice)}</td>
+                              <td className="px-4 py-2.5 text-white/50 text-[10px] uppercase">{t.reason}</td>
+                              <td className={`px-4 py-2.5 font-semibold ${t.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{signedUsd(t.pnl)}</td>
+                              <td className="px-4 py-2.5 text-white/50">{t.costs ? usd(t.costs.entryFee + t.costs.exitFee) : '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+              </Panel>
 
-              </motion.div>
+              <Panel title="Alert" right={<span className="text-[10px] text-white/40">ultimi {live.alerts.length}</span>}>
+                  {live.alerts.length === 0 ? (
+                    <Empty text="Nessun alert." />
+                  ) : (
+                    <ul className="overflow-auto max-h-[360px] text-[12px] divide-y divide-white/5">
+                      {live.alerts.map((a: Json, i: number) => (
+                        <li key={i} className="px-5 py-2 flex gap-3">
+                          <span className="text-white/35 font-mono whitespace-nowrap">{utc(a.at).slice(5)}</span>
+                          <span className={`font-bold whitespace-nowrap ${LEVEL_STYLE[a.level]}`}>{a.code}</span>
+                          <span className="text-white/70">{a.message}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+              </Panel>
 
-            )}\n          </AnimatePresence>
-        </main>
-      </div>
+              <Panel title="Journal delle decisioni" right={<span className="text-[10px] text-white/40">ogni decisione con il suo motivo, anche neutra o respinta</span>}>
+                {live.recentDecisions.length === 0 ? (
+                  <Empty text="Nessuna decisione ancora (il bot decide alla chiusura di ogni ora UTC)." />
+                ) : (
+                  <div className="overflow-auto max-h-[380px]">
+                    <table className="w-full text-left text-[12px] whitespace-nowrap">
+                      <thead className="text-white/35 text-[10px] tracking-widest uppercase border-b border-white/5 sticky top-0 bg-[#1A1C22]">
+                        <tr>
+                          {['Ora', 'Simbolo', 'Azione', 'Direzione', 'Motivo', 'Prezzo', 'Regime'].map((h) => (
+                            <th key={h} className="px-4 py-2.5 font-normal">
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {live.recentDecisions.map((d: Json, i: number) => (
+                          <tr key={i} className="border-b border-white/5">
+                            <td className="px-4 py-2 text-white/45">{utc(d.time).slice(5)}</td>
+                            <td className="px-4 py-2 font-semibold">{d.symbol}</td>
+                            <td className={`px-4 py-2 ${ACTION_STYLE[d.action] ?? 'text-amber-300'}`}>{d.action}</td>
+                            <td className="px-4 py-2 text-white/60">{d.direction ?? '—'}</td>
+                            <td className="px-4 py-2 text-white/70 max-w-[420px] truncate" title={d.reason}>
+                              {d.reason}
+                            </td>
+                            <td className="px-4 py-2 text-white/50">{price(d.price)}</td>
+                            <td className="px-4 py-2 text-white/50">{d.regime ?? '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Panel>
+            </>
+          ) : tab === 'metrics' ? (
+            <MetricsView live={live} metrics={metrics} onTestAlert={handleTestAlert} />
+          ) : (
+            <ReportsView reports={reports} selected={selectedReport} onSelect={setSelectedDay} />
+          )}
+        </div>
+      </main>
     </div>
   );
+}
 
+function MetricsView({ live, metrics, onTestAlert }: { live: Json; metrics: Json; onTestAlert: () => void }) {
+  if (!metrics) return <Empty text="Metriche non disponibili." />;
+  const t = metrics.trades;
+  const check = metrics.ledgerCheck;
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+      <Panel title="Rendimento" right={<TrendingUp className="w-4 h-4 text-emerald-400" />}>
+        <div className="px-5 py-3">
+          <Row label="PnL netto (con il non realizzato)" value={signedUsd(metrics.pnl.net)} />
+          <Row label="PnL realizzato (trade chiusi)" value={signedUsd(metrics.pnl.realized)} />
+          <Row label="PnL non realizzato" value={signedUsd(metrics.pnl.unrealized)} />
+          <Row label="Rendimento sul capitale" value={pct(metrics.pnl.totalReturnPct)} />
+          <Row label="Capitale del bot (CAPITAL_CAP_USD)" value={usd(live.initialBalance)} />
+        </div>
+      </Panel>
+      <Panel title="Trade" right={<Activity className="w-4 h-4 text-sky-300" />}>
+        <div className="px-5 py-3">
+          <Row label="Trade chiusi" value={`${t.count} (${t.wins} vinti, ${t.losses} persi)`} />
+          <Row label="Hit rate" value={pct(t.hitRatePct, 1)} />
+          <Row label="Profit factor" value={t.profitFactor == null ? 'n/d (nessuna perdita)' : num(t.profitFactor)} />
+          <Row label="Media vincente / perdente" value={`${usd(t.avgWin)} / ${usd(t.avgLoss)}`} />
+          <Row label="Expectancy per trade" value={signedUsd(t.expectancy)} />
+          <Row label="Migliore / peggiore" value={`${signedUsd(t.best)} / ${signedUsd(t.worst)}`} />
+        </div>
+      </Panel>
+      <Panel title="Rischio" right={<Shield className="w-4 h-4 text-red-400" />}>
+        <div className="px-5 py-3">
+          <Row label="Drawdown massimo" value={pct(metrics.drawdown.maxPct)} />
+          <Row label="Drawdown attuale" value={pct(metrics.drawdown.currentPct)} />
+          <Row label="Tempo sott'acqua (totale)" value={duration(metrics.drawdown.timeUnderWaterMs)} />
+          <Row label="Durata massima di un drawdown" value={duration(metrics.drawdown.maxDurationMs)} />
+          <Row label="Sharpe / Sortino (giornalieri, annualizzati)" value={metrics.ratios.note ?? `${num(metrics.ratios.sharpe)} / ${num(metrics.ratios.sortino)}`} />
+          <Row label="Limiti" value={`leva ${live.limits.maxLeverage}x · nozionale ${usd(live.limits.maxPositionNotionalUsd)} · ${live.limits.maxOpenPositions} posizioni`} />
+          <Row label="Perdita giornaliera / drawdown" value={`${live.limits.maxDailyLossPct}% · REDUCE_ONLY al ${live.limits.drawdownReduceOnlyPct}%`} />
+        </div>
+      </Panel>
+      <Panel title="Costi e ledger" right={check.consistent ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <XCircle className="w-4 h-4 text-red-400" />}>
+        <div className="px-5 py-3">
+          <Row label="PnL dei trade = equity realizzata − capitale" value={check.consistent ? 'coerente' : `differenza ${usd(check.diff)}`} tone={check.consistent ? 'text-emerald-400' : 'text-red-400'} />
+          <Row label="Fee dei trade chiusi (bot)" value={usd(metrics.costs.fees)} />
+          <Row label="Fee dal ledger di Kraken" value={check.ledgerFees == null ? 'n/d (shadow)' : `${usd(check.ledgerFees)} (differenza ${usd(check.feesDiff)})`} />
+          <Row label="Funding (bot / Kraken)" value={check.ledgerFunding == null ? `${usd(metrics.costs.funding)} / n/d` : `${usd(metrics.costs.funding)} / ${usd(check.ledgerFunding)}`} />
+          <Row label="Movimenti del conto" value={`${live.ledger.transfers.length} depositi/prelievi registrati`} />
+          <div className="pt-3">
+            <button onClick={onTestAlert} className="border border-white/20 text-white/80 hover:bg-white/5 px-4 py-2 rounded font-bold text-[10px] tracking-widest uppercase">
+              Invia un alert di prova
+            </button>
+          </div>
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+function ReportsView({ reports, selected, onSelect }: { reports: Json[]; selected: Json | null; onSelect: (day: string) => void }) {
+  if (reports.length === 0) return <Empty text="Nessun report giornaliero ancora: il primo arriva dopo la mezzanotte UTC." />;
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+      <Panel title="Giorni" right={<FileText className="w-4 h-4 text-white/40" />}>
+        <ul className="divide-y divide-white/5">
+          {reports.map((r) => {
+            const [label, style] = PARITY[r.parity?.status ?? 'NOT_AVAILABLE'];
+            return (
+              <li key={r.day}>
+                <button onClick={() => onSelect(r.day)} className={`w-full text-left px-5 py-3 flex items-center justify-between gap-3 hover:bg-white/[0.03] ${selected?.day === r.day ? 'bg-white/[0.05]' : ''}`}>
+                  <div>
+                    <div className="font-mono text-[12px] text-white/85">{r.day}</div>
+                    <div className="text-[11px] text-white/40">
+                      {signedUsd(r.equity.change)} · {r.pnl.trades} trade · {r.issues.length ? `${r.issues.length} da verificare` : 'regolare'}
+                    </div>
+                  </div>
+                  <Badge text={label} className={style} />
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </Panel>
+      {selected && (
+        <div className="lg:col-span-2 flex flex-col gap-5">
+          <Panel title={`Report ${selected.day} (${selected.mode})`}>
+            <div className="px-5 py-3 grid grid-cols-1 md:grid-cols-2 gap-x-8">
+              <div>
+                <Row label="Equity inizio → fine" value={`${usd(selected.equity.start)} → ${usd(selected.equity.end)}`} />
+                <Row label="Variazione" value={`${signedUsd(selected.equity.change)} (${pct(selected.equity.changePct)})`} />
+                <Row label="Drawdown nel giorno (equity oraria)" value={pct(selected.equity.maxDrawdownPct)} />
+                <Row label="Trade chiusi" value={`${selected.pnl.trades} · ${signedUsd(selected.pnl.realized)}`} />
+                <Row label="Fee bot / Kraken" value={`${usd(selected.fees.bot)} / ${selected.fees.ledger == null ? 'n/d' : usd(selected.fees.ledger)}`} />
+                <Row label="Funding Kraken" value={selected.funding.ledger == null ? 'n/d' : usd(selected.funding.ledger)} />
+              </div>
+              <div>
+                <Row label="Slippage decisioni (modello)" value={`${num(selected.slippage.strategy.avgBps)} bps (${selected.slippage.modelBps}) su ${selected.slippage.strategy.samples} fill`} tone={selected.slippage.strategy.withinModel === false ? 'text-red-400' : 'text-white/85'} />
+                <Row label="Slippage stop nativi" value={selected.slippage.stops.samples ? `${num(selected.slippage.stops.avgBps)} bps su ${selected.slippage.stops.samples}` : '—'} />
+                <Row label="Ingressi decisi / inviati" value={`${selected.entries.decided} / ${selected.entries.sent}`} />
+                <Row label="Fill rate" value={pct(selected.entries.fillRatePct, 1)} />
+                <Row label="Respinti (guardrail · tardivi)" value={`${selected.entries.rejectedByGuard} · ${selected.entries.stale + selected.entries.blocked}`} />
+                <Row label="Alert (critici)" value={`${selected.alerts.total} (${selected.alerts.critical})`} />
+              </div>
+            </div>
+            {selected.issues.length > 0 && (
+              <ul className="px-5 pb-4 text-[12px] text-amber-200/90 font-mono space-y-1">
+                {selected.issues.map((i: string, k: number) => (
+                  <li key={k}>• {i}</li>
+                ))}
+              </ul>
+            )}
+          </Panel>
+          <Panel title="Confronto con il backtest sugli stessi dati" right={<Badge text={PARITY[selected.parity?.status ?? 'NOT_AVAILABLE'][0]} className={PARITY[selected.parity?.status ?? 'NOT_AVAILABLE'][1]} />}>
+            <div className="px-5 py-3 text-[12px]">
+              {!selected.parity || selected.parity.status === 'NOT_AVAILABLE' ? (
+                <div className="text-white/50">{selected.parity?.reason ?? 'non calcolato'}</div>
+              ) : (
+                <>
+                  <Row label="Metodo" value={selected.parity.mode === 'simulated' ? 'shadow: replay con il modello del backtest' : 'replay con i fill reali di Kraken'} />
+                  <Row label="Intervallo" value={`${utc(selected.parity.fromSlot)} → ${utc(selected.parity.toSlot)}`} />
+                  <Row label="Confrontati" value={`${selected.parity.compared.decisions} decisioni · ${selected.parity.compared.trades} trade`} />
+                  <Row label="Differenze spiegate / non spiegate" value={`${selected.parity.explained} / ${selected.parity.unexplained}`} tone={selected.parity.unexplained ? 'text-red-400' : 'text-white/85'} />
+                  {selected.parity.divergences.length > 0 && (
+                    <div className="overflow-x-auto mt-3">
+                      <table className="w-full text-left text-[11px]">
+                        <thead className="text-white/35 text-[10px] uppercase tracking-widest">
+                          <tr>
+                            {['Ora', 'Simbolo', 'Bot', 'Backtest', 'Spiegazione'].map((h) => (
+                              <th key={h} className="py-2 pr-3 font-normal">
+                                {h}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selected.parity.divergences.map((d: Json, i: number) => (
+                            <tr key={i} className="border-t border-white/5 align-top">
+                              <td className="py-2 pr-3 whitespace-nowrap text-white/50">{hhmm(d.slotTime)}</td>
+                              <td className="py-2 pr-3">{d.symbol}</td>
+                              <td className="py-2 pr-3 text-white/70">{d.actual ?? '—'}</td>
+                              <td className="py-2 pr-3 text-white/70">{d.replay ?? '—'}</td>
+                              <td className={`py-2 pr-3 ${d.explanation ? 'text-sky-300' : 'text-red-400'}`}>{d.explanation ?? 'non spiegata'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </Panel>
+        </div>
+      )}
+    </div>
+  );
 }

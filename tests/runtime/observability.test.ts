@@ -93,6 +93,18 @@ test('health: dati fermi e lease perso compaiono tra i problemi', async () => {
   assert.ok(expired.issues.some((i) => i.startsWith('lease:')));
 });
 
+test('alert di ingresso e di uscita anche in shadow, con il positionId', async () => {
+  const world = makeWorld();
+  const { inst } = withLogs(world, 'shadow');
+  await inst.runtime.ensureRunning();
+  await runUntil(world, inst, Date.parse('2022-01-21T12:00:00Z'));
+  const entries = inst.alerts.alerts.filter((a) => a.code === 'ENTRY');
+  const exits = inst.alerts.alerts.filter((a) => a.code === 'EXIT');
+  assert.deepEqual(entries.map((a) => a.context?.positionId), ['SOL-2022-01-21T01:45:00.000Z']);
+  assert.match(entries[0].message, /Ingresso LONG SOL \(simulato\)/);
+  assert.deepEqual(exits.map((a) => a.context?.positionId), ['SOL-2022-01-21T01:45:00.000Z']);
+});
+
 test('journal: a ogni chiusura oraria un record per ogni simbolo, con il motivo (anche NEUTRAL e senza dati)', async () => {
   const world = makeWorld('2022-01-21T00:00:00Z', '2022-01-22T23:45:00Z');
   // Una candela mancante: SOL alle 05:45 del 21 gennaio.

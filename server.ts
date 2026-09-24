@@ -89,6 +89,8 @@ async function startServer() {
         await channel.sink.send(alert);
         return { sent: true, channel: channel.name, at: alert.at };
       },
+      dailyReports: async (limit) => runtime.dailyReports(limit),
+      dailyReport: async (day) => runtime.dailyReport(day),
       killSwitch: async (source) => runtime.killSwitch(source),
       resumeRisk: async (confirmation) => ({ operationalState: await runtime.resumeRisk(confirmation) }),
     },

@@ -23,6 +23,8 @@ function startApp(env: Record<string, string>, overrides: { failWith?: Error; un
       cronTick: async () => (await act('cron')(), overrides.unhealthy ? { isActive: true, healthy: false, issues: ['ciclo di protezione fermo da 120 s'] } : { isActive: true, healthy: true, issues: [] }),
       health: act('health'),
       testAlert: act('alert-test'),
+      dailyReports: async (limit: number) => (await act(`reports:${limit}`)(), [{ day: '2026-09-23' }]),
+      dailyReport: async (day: string) => (await act(`report:${day}`)(), day === '2026-09-23' ? { day } : null),
       killSwitch: async (source: string) => (await act(`kill:${source}`)(), { opState: 'HALTED', steps: [] }),
       resumeRisk: async (confirmation: string) => (await act(`resume:${confirmation}`)(), { operationalState: 'RUNNING' }),
     },
@@ -69,6 +71,8 @@ const protectedRoutes: [string, string][] = [
   ['POST', '/api/risk/resume'],
   ['GET', '/api/health/details'],
   ['POST', '/api/alerts/test'],
+  ['GET', '/api/reports/daily'],
+  ['GET', '/api/reports/daily/2026-09-23'],
 ];
 
 test('le API di controllo senza token rispondono 401 e non toccano il motore', async () => {
@@ -135,6 +139,16 @@ test('health dettagliato e alert di prova solo con token admin (F6)', async () =
   assert.equal(res.status, 200);
   assert.equal((await fetch(shadow.base + '/api/alerts/test', { method: 'POST', headers: auth(ADMIN) })).status, 200);
   assert.ok(shadow.calls.includes('health') && shadow.calls.includes('alert-test'));
+});
+
+test('report giornalieri (F6): elenco con limite, giorno valido, 404 se manca, 400 se il formato è sbagliato', async () => {
+  const list = await fetch(shadow.base + '/api/reports/daily?limit=500', { headers: auth(ADMIN) });
+  assert.equal(list.status, 200);
+  assert.deepEqual(await list.json(), [{ day: '2026-09-23' }]);
+  assert.ok(shadow.calls.includes('reports:90'), 'limite massimo 90');
+  assert.equal((await fetch(shadow.base + '/api/reports/daily/2026-09-23', { headers: auth(ADMIN) })).status, 200);
+  assert.equal((await fetch(shadow.base + '/api/reports/daily/2026-09-22', { headers: auth(ADMIN) })).status, 404);
+  assert.equal((await fetch(shadow.base + '/api/reports/daily/ieri', { headers: auth(ADMIN) })).status, 400);
 });
 
 test('in shadow le operazioni Kraken sono rifiutate (409) anche con token valido', async () => {

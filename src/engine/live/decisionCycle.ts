@@ -43,10 +43,23 @@ export type CycleEvent =
   | { type: 'CANDLE_MISSING'; slot: number; symbols: string[] }
   | { type: 'CANDLE_DISCARDED'; symbol: string; t: number; reason: 'NOT_CLOSED' | 'OUT_OF_RANGE' | 'MISALIGNED' | 'DUPLICATE' }
   | { type: 'STALE_ENTRY_REJECTED'; slot: number; positionId: string; delayMs: number }
-  | { type: 'INTENT_REJECTED'; slot: number; positionId: string; reason: string }
+  | { type: 'INTENT_REJECTED'; slot: number; positionId: string; reason: string; kind: 'OPEN' | 'CLOSE'; phase: 'settle' | 'execute' }
   | { type: 'INTENT_PENDING'; slot: number; positionId: string }
   | { type: 'CHECKPOINT_FAILED'; slot: number; reason: string }
   | { type: 'ENTRY_BLOCKED'; slot: number; positionId: string; reason: string };
+
+/** Fill applicato al core, con il riferimento del modello (per lo slippage) e il punto in cui è stato applicato. */
+export interface ExecutedFill extends Fill {
+  side: 'buy' | 'sell';
+  /**
+   * Prezzo di riferimento: chiusura dello slot per ingressi e uscite decise dalla strategia, livello
+   * del backstop per gli stop nativi; null quando il modello non lo prevede (chiusure esterne, kill switch).
+   */
+  referencePrice: number | null;
+  /** Slot in cui il fill è stato applicato al core e fase (settle: arrivato dall'exchange; execute: esito di un intento). */
+  appliedAtSlot: number | null;
+  phase: 'settle' | 'execute' | 'external';
+}
 
 export interface TickResult {
   processedSlots: number;
@@ -59,6 +72,8 @@ export interface TickResult {
   events: CycleEvent[];
   /** Equity alle chiusure orarie elaborate in questo tick. */
   equity: EquitySnapshot[];
+  /** Fill applicati al core in questo tick. */
+  fills: ExecutedFill[];
 }
 
 export interface DecisionCycleDeps {
@@ -156,24 +171,42 @@ export class DecisionCycle {
     }));
   }
 
-  private applyFills(fills: readonly Fill[], trades: TradeRecord[]): void {
+  /** Lato e riferimento di un fill, letti dallo stato del core PRIMA di applicarlo. */
+  private fillInfo(fill: Fill): { side: 'buy' | 'sell'; referencePrice: number | null } {
+    const s = this.core.state;
+    if (fill.kind === 'OPEN') {
+      const intent = s.pendingOpens[fill.positionId];
+      return { side: intent?.direction === 'SHORT' ? 'sell' : 'buy', referencePrice: intent?.referencePrice ?? null };
+    }
+    const pos = s.positions[fill.symbol];
+    const side = pos?.trade.direction === 'SHORT' ? 'buy' : 'sell';
+    const pending = s.pendingCloses[fill.positionId];
+    if (pending) return { side, referencePrice: pending.intent.referencePrice };
+    if (fill.exitType === 'BACKSTOP') return { side, referencePrice: pos?.backstop ?? null };
+    return { side, referencePrice: null };
+  }
+
+  private applyFills(fills: readonly Fill[], trades: TradeRecord[], executed: ExecutedFill[], slot: number | null, phase: ExecutedFill['phase']): void {
     for (const fill of fills) {
+      const info = this.fillInfo(fill);
       const record = this.core.applyFill(fill);
+      executed.push({ ...fill, ...info, appliedAtSlot: slot, phase });
       if (record) trades.push(record);
     }
   }
 
-  private applyReport(slot: number, report: ExecutionReport, result: TickResult): void {
-    this.applyFills(report.fills, result.trades);
+  private applyReport(slot: number, report: ExecutionReport, result: TickResult, phase: 'settle' | 'execute'): void {
+    this.applyFills(report.fills, result.trades, result.fills, slot, phase);
     for (const rejection of report.rejected) {
+      const kind = this.core.state.pendingOpens[rejection.positionId] ? 'OPEN' : 'CLOSE';
       this.core.rejectIntent(rejection.positionId);
-      result.events.push({ type: 'INTENT_REJECTED', slot, positionId: rejection.positionId, reason: rejection.reason });
+      result.events.push({ type: 'INTENT_REJECTED', slot, positionId: rejection.positionId, reason: rejection.reason, kind, phase });
     }
   }
 
   async tick(now: number): Promise<TickResult> {
     if (!this.started) throw new Error('DecisionCycle non avviato: chiamare start()');
-    const result: TickResult = { processedSlots: 0, waiting: false, lastSlot: this.core.state.lastSlot, intents: [], journal: [], trades: [], events: [], equity: [] };
+    const result: TickResult = { processedSlots: 0, waiting: false, lastSlot: this.core.state.lastSlot, intents: [], journal: [], trades: [], events: [], equity: [], fills: [] };
     let latest = lastClosedSlot(now);
     if (this.config.finalSlot !== undefined) latest = Math.min(latest, this.config.finalSlot);
     const first = this.nextSlot();
@@ -196,7 +229,7 @@ export class DecisionCycle {
         this.core.processSlot(slot, candles, { warmupOnly: true });
         continue;
       }
-      this.applyReport(slot, await this.deps.port.settle(slot, candles), result);
+      this.applyReport(slot, await this.deps.port.settle(slot, candles), result, 'settle');
       if (isHourCloseSlot(slot)) {
         for (const charge of await this.deps.port.funding(slot, this.fundingPositions(candles))) this.core.applyFunding(charge.symbol, charge.amount);
       }
@@ -229,7 +262,7 @@ export class DecisionCycle {
           toExecute.splice(0, toExecute.length, ...toExecute.filter((i) => i.kind !== 'OPEN'));
         }
       }
-      this.applyReport(slot, await this.deps.port.execute(toExecute), result);
+      this.applyReport(slot, await this.deps.port.execute(toExecute), result, 'execute');
       for (const id of [...Object.keys(this.core.state.pendingOpens), ...Object.keys(this.core.state.pendingCloses)]) {
         result.events.push({ type: 'INTENT_PENDING', slot, positionId: id });
       }
@@ -243,11 +276,12 @@ export class DecisionCycle {
   }
 
   /** Applica fill e rifiuti arrivati fuori da un tick (kill switch). */
-  applyExternal(report: ExecutionReport): { trades: TradeRecord[] } {
+  applyExternal(report: ExecutionReport): { trades: TradeRecord[]; fills: ExecutedFill[] } {
     const trades: TradeRecord[] = [];
-    this.applyFills(report.fills, trades);
+    const fills: ExecutedFill[] = [];
+    this.applyFills(report.fills, trades, fills, this.core.state.lastSlot, 'external');
     for (const r of report.rejected) this.core.rejectIntent(r.positionId);
-    return { trades };
+    return { trades, fills };
   }
 
   /** Annulla un intento rimasto in sospeso (recovery: ordine mai inviato). */

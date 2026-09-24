@@ -6,12 +6,17 @@
 //   decisions/{ora}        journal delle decisioni di una chiusura oraria (append-only, retention)
 //   equity/{giorno}        equity oraria del giorno (un documento al giorno)
 //   ledger/{id}            movimenti dell'account log di Kraken (fee, funding, trasferimenti)
+//   reports/daily-{giorno} report giornaliero (F6); reports/checkpoint-{giorno} stato del core a
+//                          inizio giorno, per il confronto con il backtest sugli stessi dati
 // Si scrive solo quando qualcosa cambia (confronto del contenuto) e le scritture sono contate
 // per giorno UTC: oltre il budget si sospendono quelle non essenziali (journal, equity) con un
 // alert, mai quelle di stato e ordini.
 import type { CoreState } from '../core/decisionCore';
 import type { DecisionRecord, TradeRecord } from '../core/types';
+import type { LedgerEntry } from '../exchange/accountLedger';
 import type { OrderRecord, OrderStore } from '../exchange/orders';
+import type { DailyReport } from '../ops/dailyReport';
+import type { DayCheckpoint } from '../ops/dayParity';
 import { TERMINAL_STATES } from '../exchange/orders';
 import { canonicalHash } from '../util/canonical';
 import type { DocumentStore } from './documentStore';
@@ -145,6 +150,77 @@ export class BotStore {
     this.budget.recordWrite();
     this.snapshotHash = hash;
     return true;
+  }
+
+  // --- Report giornalieri e checkpoint del giorno (F6) ------------------------------------------
+
+  /** Stato del core all'inizio del giorno, per il confronto con il backtest (una scrittura al giorno). */
+  async saveDayCheckpoint(checkpoint: DayCheckpoint): Promise<boolean> {
+    if (!this.budget.allowOptional()) {
+      this.budget.recordSkip('over_budget');
+      return false;
+    }
+    await this.docs.set(`reports/checkpoint-${checkpoint.day}`, { kind: 'checkpoint', ...checkpoint });
+    this.budget.recordWrite();
+    return true;
+  }
+
+  async loadDayCheckpoint(day: string): Promise<DayCheckpoint | null> {
+    const doc = await this.docs.get<DayCheckpoint & { kind: string }>(`reports/checkpoint-${day}`);
+    if (!doc) return null;
+    const { kind: _kind, ...checkpoint } = doc;
+    return checkpoint;
+  }
+
+  async saveDailyReport(report: DailyReport): Promise<void> {
+    await this.docs.set(`reports/daily-${report.day}`, { kind: 'daily', ...report });
+    this.budget.recordWrite();
+  }
+
+  async dailyReport(day: string): Promise<DailyReport | null> {
+    const doc = await this.docs.get<DailyReport & { kind: string }>(`reports/daily-${day}`);
+    if (!doc) return null;
+    const { kind: _kind, ...report } = doc;
+    return report;
+  }
+
+  /** Ultimi report giornalieri, dal più recente. */
+  async recentDailyReports(limit: number): Promise<DailyReport[]> {
+    const docs = await this.docs.query<DailyReport & { kind: string }>('reports', [{ field: 'kind', op: '==', value: 'daily' }]);
+    return docs.map(({ data: { kind: _kind, ...report } }) => report).sort((a, b) => b.day.localeCompare(a.day)).slice(0, limit);
+  }
+
+  /** Journal delle chiusure orarie comprese tra `from` e `to` (slot, inclusi). */
+  async decisionsBetween(from: number, to: number): Promise<DecisionRecord[]> {
+    const docs = await this.docs.query<{ slotTime: number; records: DecisionRecord[] }>('decisions', [{ field: 'slotTime', op: '<', value: to + 1 }]);
+    return docs.filter((d) => d.data.slotTime >= from).sort((a, b) => a.data.slotTime - b.data.slotTime).flatMap((d) => d.data.records);
+  }
+
+  /** Voci del ledger di Kraken di un giorno UTC. */
+  async ledgerOfDay(day: string): Promise<LedgerEntry[]> {
+    const docs = await this.docs.query<LedgerEntry>('ledger', []);
+    return docs.map((d) => d.data).filter((e) => e.date.startsWith(day));
+  }
+
+  /** Totali di fee e funding del ledger di Kraken da un istante in poi. */
+  async ledgerTotalsSince(fromIso: string): Promise<{ fees: number; funding: number }> {
+    const docs = await this.docs.query<LedgerEntry>('ledger', []);
+    const entries = docs.map((d) => d.data).filter((e) => e.date >= fromIso);
+    return { fees: entries.reduce((a, e) => a + (e.fee ?? 0), 0), funding: entries.reduce((a, e) => a + (e.realizedFunding ?? 0), 0) };
+  }
+
+  /** Solo reset dello shadow: storico del vecchio stato eliminato (trade, journal, equity, report). */
+  async clearHistory(): Promise<number> {
+    let deleted = 0;
+    for (const collection of ['trades', 'decisions', 'equity', 'reports']) {
+      for (const d of await this.docs.query(collection, [])) {
+        await this.docs.delete(`${collection}/${d.id}`);
+        this.budget.recordWrite();
+        deleted++;
+      }
+    }
+    this.equityDay = null;
+    return deleted;
   }
 
   async appendTrade(positionId: string, trade: TradeRecord): Promise<void> {

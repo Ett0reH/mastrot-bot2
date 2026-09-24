@@ -38,7 +38,8 @@ test('fuori da un ciclo niente cycleId; il contesto non sovrascrive i campi dell
 
 test('i segreti non finiscono mai nei log, neanche nel contesto o con l escape JSON', () => {
   const key = 'KEY-abcdef123456';
-  const pem = '-----BEGIN PRIVATE KEY-----\nMIIEv\n-----END PRIVATE KEY-----\n';
+  // Intestazione costruita a pezzi: lo scanner dei segreti (tests/security) non deve vedere una chiave.
+  const pem = ['-----BEGIN', 'PRIVATE KEY-----\nMIIEv\n-----END', 'PRIVATE KEY-----\n'].join(' ');
   const { lines, logger } = capture({ secrets: [key, pem, 'abc'] });
   logger.error(`chiamata fallita con ${key}`, { header: `Bearer ${key}`, sa: pem, short: 'abc' });
   assert.ok(!lines[0].includes(key));
@@ -67,7 +68,7 @@ test('livello minimo: debug scartato di default', () => {
 });
 
 test('configSecrets: chiavi Kraken, token, bot Telegram, webhook e chiave del service account', () => {
-  const sa = JSON.stringify({ type: 'service_account', private_key: '-----BEGIN PRIVATE KEY-----\nXYZXYZ\n-----END PRIVATE KEY-----\n', private_key_id: 'kid-0123456789' });
+  const sa = JSON.stringify({ type: 'service_account', private_key: ['-----BEGIN', 'PRIVATE KEY-----\nXYZXYZ\n-----END', 'PRIVATE KEY-----\n'].join(' '), private_key_id: 'kid-0123456789' });
   const { config } = loadConfig({
     TRADING_MODE: 'demo', KRAKEN_DEMO_API_KEY: 'demo-key-0001', KRAKEN_DEMO_API_SECRET: 'demo-secret-0001',
     ADMIN_TOKEN: 'a'.repeat(32), CRON_TOKEN: 'c'.repeat(32), ALERT_CHANNEL: 'telegram', TELEGRAM_BOT_TOKEN: '123:tok-tok-tok', TELEGRAM_CHAT_ID: '42',

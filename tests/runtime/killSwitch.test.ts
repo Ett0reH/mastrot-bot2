@@ -145,6 +145,7 @@ test('kill switch interrotto da un crash del processo: il nuovo processo lo ripr
   assert.equal(openOnKraken(world).length, open.length - 1, 'una sola posizione chiusa prima del crash');
 
   world.clock.t += 70_000; // il lease del processo morto scade
+  const tradesBefore = new Set((await world.docs.query('trades', [])).map((d) => d.id));
   const b = makeInstance(world, 'B');
   assert.equal(await b.runtime.ensureRunning(), 'RUNNING');
   assert.equal(b.runtime.operationalState, 'HALTING', 'il nuovo processo sa che il kill switch è in corso');
@@ -155,7 +156,8 @@ test('kill switch interrotto da un crash del processo: il nuovo processo lo ripr
   assert.ok(Object.values(filledKillCloses(world)).every((n) => n === 1), JSON.stringify(filledKillCloses(world)));
   assert.equal(Object.keys(filledKillCloses(world)).length, open.length);
   assert.equal((b.runtime.statusPayload().openPositions as unknown[]).length, 0, 'il core del nuovo processo è allineato');
-  assert.deepEqual(b.runtime.recentTrades.map((t) => t.reason), open.map(() => 'KILL_SWITCH'), 'chiusure attribuite al kill switch');
+  const closedByB = (await world.docs.query<{ reason: string }>('trades', [])).filter((d) => !tradesBefore.has(d.id));
+  assert.deepEqual(closedByB.map((d) => d.data.reason), open.map(() => 'KILL_SWITCH'), 'chiusure attribuite al kill switch');
   assert.ok(!b.alerts.codes().includes('DESYNC') && !b.alerts.codes().includes('UNKNOWN_POSITION'));
 });
 

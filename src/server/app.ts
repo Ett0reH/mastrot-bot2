@@ -24,6 +24,10 @@ export interface EngineControlApi {
   health(): Promise<unknown>;
   /** Invia un alert di prova sul canale configurato e ne riporta l'esito. */
   testAlert(): Promise<unknown>;
+  /** Report giornalieri (F6): gli ultimi `limit`, dal più recente. */
+  dailyReports(limit: number): Promise<unknown[]>;
+  /** Report di un giorno UTC (YYYY-MM-DD), null se non esiste. */
+  dailyReport(day: string): Promise<unknown | null>;
   /** Kill switch (F5): chiude tutto, verifica il conto flat, ferma il bot. Idempotente. */
   killSwitch(source: string): Promise<unknown>;
   /** Ripresa da REDUCE_ONLY o HALTED con la frase di conferma. */
@@ -138,6 +142,25 @@ export function createApp(deps: AppDeps): express.Express {
   // --- Osservabilità (F6) ---
   app.get('/api/health/details', requireAdmin, run('health', () => deps.engine.health()));
   app.post('/api/alerts/test', requireAdmin, run('alert-test', () => deps.engine.testAlert()));
+  app.get('/api/reports/daily', requireAdmin, run('daily-reports', (req) => {
+    const limit = Math.min(90, Math.max(1, Number.parseInt(String(req.query.limit ?? '30'), 10) || 30));
+    return deps.engine.dailyReports(limit);
+  }));
+  app.get('/api/reports/daily/:day', requireAdmin, async (req, res) => {
+    const day = String(req.params.day);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+      res.status(400).json({ error: 'Giorno non valido: usare YYYY-MM-DD' });
+      return;
+    }
+    try {
+      const report = await deps.engine.dailyReport(day);
+      if (report === null) res.status(404).json({ error: `Nessun report per il ${day}` });
+      else res.json(report);
+    } catch (error) {
+      logError('[API] daily-report fallita', error);
+      res.status(500).json({ error: errorMessage(error) });
+    }
+  });
 
   // --- Guardrail (F5): kill switch e ripresa manuale ---
   app.post('/api/kill-switch', requireAdmin, run('kill-switch', () => deps.engine.killSwitch('api')));

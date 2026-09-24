@@ -93,6 +93,8 @@ export function makeInstance(
     cycle?: CycleContext;
     /** Lease di produzione (3 minuti, margine 60 s) invece di quello corto dei test. */
     productionLease?: boolean;
+    /** Ritardo di pubblicazione delle candele (default 20 s). */
+    publishDelay?: (symbol: string, t: number) => number;
   } = {},
 ) {
   const { logger, cycle } = options;
@@ -106,7 +108,7 @@ export function makeInstance(
   const lease = new LeaseManager(docs, id, { now, ...timing, onWrite: () => budget.recordWrite() });
   const alerts = new MemoryAlertSink();
   const state = { alive: true };
-  const source = new ReplayCandleSource(world.data, now, () => 20_000);
+  const source = new ReplayCandleSource(world.data, now, options.publishDelay ?? (() => 20_000));
   if (options.mode === 'shadow') {
     const runtime = new BotRuntime({ config, now, store, lease, source, alerts, logger, cycle }, { startMs: world.startMs });
     return { id, runtime, store, lease, alerts, docs, state, orders: null };

@@ -35,6 +35,13 @@ La dashboard chiede l'`ADMIN_TOKEN` al primo accesso e lo salva nel browser.
 - **Kill switch** (idempotente): pulsante "Emergency Kill Switch" della dashboard, `POST /api/kill-switch` (admin), oppure il campo `killSwitch: true` nel documento Firestore `bot_runtime/control` (anche scritto a mano dalla console). Cancella gli ordini non protettivi, chiude tutte le posizioni reduceOnly, verifica il conto flat, rimuove gli stop residui e passa in `HALTED`. Se Kraken fallisce a metà riprende al ciclo di protezione successivo.
 - **Ripresa** da `REDUCE_ONLY` o `HALTED`: pulsante "Riprendi" o `POST /api/risk/resume` con `{"confirm": "CONFERMO_RIPRESA"}`; rifiutata finché il flag su Firestore è attivo.
 
+## Osservabilità
+
+- **Log:** una riga JSON per evento, con `cycleId`, `positionId` e `cliOrdId` per seguire un'operazione dall'intento all'ordine allo stop.
+- **Alert:** `ALERT_CHANNEL=telegram` (con `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID`) o `webhook` (`ALERT_WEBHOOK_URL`); prova del canale con `POST /api/alerts/test` o dal tab "Metriche".
+- **Health:** `GET /api/health/details` (admin). Il cron esterno su `/api/cron/tick` riceve 503 se i cicli del bot sono fermi.
+- **Report giornaliero:** a fine giorno UTC, con il confronto con il backtest sugli stessi dati; `GET /api/reports/daily` e tab "Report" della dashboard.
+
 ## Comandi
 
 | Comando | Cosa fa |
@@ -49,6 +56,7 @@ La dashboard chiede l'`ADMIN_TOKEN` al primo accesso e lo salva nel browser.
 | `npm run risk:audit` | Audit dei guardrail sul golden backtest (quante volte ogni limite sarebbe scattato) |
 | `npm run kraken:demo-smoke` | Smoke test dell'execution layer su Kraken **demo** (chiavi demo richieste) |
 | `npm run kraken:demo-kill -- --yes` | Prova del kill switch su Kraken **demo**: chiude tutte le posizioni del conto demo |
+| `npm run dashboard:replay` | Dashboard su dati storici reali in replay (dopo `npm run build`; badge REPLAY), per vederla senza rete verso Kraken |
 | `npm run data:verify` | Verifica checksum e integrità del dataset |
 | `npm run data:download` | Ricostruisce il dataset completo da Kraken (serve rete verso futures.kraken.com) |
 | `npm run build` / `npm start` | Build di produzione e avvio |
