@@ -93,8 +93,11 @@ export interface Fill {
 export interface DecisionRecord {
   slotTime: number;
   symbol: string;
-  /** REJECTED: intento deciso dal core e respinto prima dell'invio (guardrail) o dall'exchange. */
-  action: 'NO_SIGNAL' | 'COOLDOWN' | 'BLOCKED' | 'TIER_BLOCKED' | 'SIZE_ZERO' | 'OPEN' | 'CLOSE' | 'HOLD' | 'HALTED' | 'PENDING_ORDER' | 'REJECTED';
+  /**
+   * REJECTED: intento deciso dal core e respinto prima dell'invio (guardrail) o dall'exchange.
+   * NO_DATA: simbolo non valutato all'ora (candela mancante o storico insufficiente).
+   */
+  action: 'NO_SIGNAL' | 'COOLDOWN' | 'BLOCKED' | 'TIER_BLOCKED' | 'SIZE_ZERO' | 'OPEN' | 'CLOSE' | 'HOLD' | 'HALTED' | 'PENDING_ORDER' | 'REJECTED' | 'NO_DATA';
   reason: string;
   direction?: Direction | 'NEUTRAL';
   regime?: TradingRegime;

@@ -65,6 +65,8 @@ export interface BookPosition {
   size: number;
   entryPrice: number;
   stopLevel: number;
+  /** Prezzo dello stop confermato su Kraken (arrotondato al tick), dopo l'ultima verifica riuscita. */
+  stopOnExchange?: number | null;
   openedAt: number;
   unprotectedSince: number | null;
   closing: { reason: CloseReason; since: number } | null;
@@ -250,9 +252,11 @@ export class KrakenExecutionPort implements ExecutionPort {
     }
     if (status.status === 'PROTECTED') {
       pos.unprotectedSince = null;
+      pos.stopOnExchange = status.stop.stopPrice;
       return;
     }
     if (status.status === 'NO_POSITION') return; // la chiusura viene attribuita dalla riconciliazione
+    pos.stopOnExchange = null;
     pos.unprotectedSince ??= this.now();
     const expired = this.now() - pos.unprotectedSince >= this.config.stopTimeoutMs;
     if (status.status === 'FAILED' || expired) {

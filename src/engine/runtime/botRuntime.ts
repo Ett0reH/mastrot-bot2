@@ -29,13 +29,15 @@ import { REALISTIC_PROFILE } from '../backtest/profiles';
 import { DecisionCycle, type DecisionCycleConfig, lastClosedSlot, LIVE_CYCLE_DEFAULTS, type TickResult } from '../live/decisionCycle';
 import { coreConfigFromEngine } from '../live/liveCycleConfig';
 import type { CandleSource } from '../live/ports';
-import { type Alert, type AlertCode, type AlertLevel, type AlertSink, makeAlert } from '../ops/alerts';
+import { type Alert, type AlertCode, type AlertLevel, type AlertSink, makeAlert, RecordingAlertSink } from '../ops/alerts';
+import { type CycleContext, Logger, type LogLevel } from '../ops/logger';
 import type { BotStore, EquityPoint, RuntimeSnapshot } from '../persistence/botStore';
 import { SimExecutionPort } from '../replay/replay';
 import type { RestingStop } from '../sim/simExchange';
 import { checkEntry, evaluateEquity, type EquityWatch, type OperationalState } from '../risk/riskGuard';
 import type { Fill, OpenIntent } from '../core/types';
 import { GatedExecutionPort } from './gatedPort';
+import type { HeartbeatStatus } from './heartbeat';
 import type { LeaseManager } from './lease';
 
 export type RuntimeStatus = 'STARTING' | 'SAFE_MODE' | 'STANDBY' | 'RECOVERING' | 'RUNNING' | 'STOPPED';
@@ -62,7 +64,10 @@ export interface RuntimeDeps {
   alerts: AlertSink;
   /** Obbligatorio in demo e live, assente in shadow. */
   kraken?: KrakenRuntimeDeps;
-  log?: (level: 'info' | 'warn' | 'error', message: string) => void;
+  /** Log strutturato (F6); in assenza, nessun log. */
+  logger?: Logger;
+  /** Ciclo in corso, condiviso con i logger e gli alert (correlation id `cycleId`). */
+  cycle?: CycleContext;
 }
 
 export interface RuntimeOptions {
@@ -89,6 +94,41 @@ type Snapshot = RuntimeSnapshot<PortSnapshot> & { runtime: RuntimeSnapshot['runt
 
 function initialRiskState(): RiskRuntimeState {
   return { opState: 'RUNNING', equityWatch: { dayStart: null }, dailyLossBlockUntil: null, riskHighWater: null, killRun: null };
+}
+
+/** Stato di protezione di una posizione: stop nativo verificato, scoperta, in attesa, simulato (shadow). */
+export type ProtectionStatus = 'NATIVE_STOP_OK' | 'UNPROTECTED' | 'PENDING' | 'SIMULATED';
+
+export interface PositionHealth {
+  id: string;
+  symbol: string;
+  direction: string;
+  size: number;
+  protection: ProtectionStatus;
+  /** Livello dello stop sull'exchange (o simulato), null se non noto. */
+  stopLevel: number | null;
+  unprotectedSince: string | null;
+}
+
+/** Health del runtime (F6): quello che serve per sapere se il bot è sotto controllo. */
+export interface HealthReport {
+  healthy: boolean;
+  issues: string[];
+  at: string;
+  mode: TradingMode;
+  runtimeStatus: RuntimeStatus;
+  operationalState: OperationalState;
+  paused: boolean;
+  entryBlock: string | null;
+  lease: { holder: string | null; epoch: number | null; expiresAt: string | null; valid: boolean; reason: string | null };
+  data: { lastSlot: string | null; ageMs: number | null; stale: boolean };
+  cycles: { lastDecisionAt: string | null; decisionTicks: number; protectionTicks: number; failedTicks: number };
+  heartbeat: HeartbeatStatus | null;
+  positions: PositionHealth[];
+  unknownPositions: { symbol: string; side: string; size: number; protectionId: string }[];
+  allProtected: boolean;
+  persistence: { healthy: boolean; writes: ReturnType<BotStore['budget']['snapshot']> };
+  recentErrors: { at: string; source: 'log' | 'alert'; level: string; message: string; code?: string }[];
 }
 
 /** Frase richiesta per riprendere da REDUCE_ONLY o HALTED (azione di una persona). */
@@ -120,13 +160,19 @@ export class BotRuntime {
   readonly recentJournal: DecisionRecord[] = [];
   readonly recentTrades: TradeRecord[] = [];
   readonly equityHistory: EquityPoint[] = [];
-  readonly recentAlerts: Alert[] = [];
+  /** Alert di tutti i componenti (se il factory passa lo stesso registro anche allo StopManager). */
+  private readonly alertSink: RecordingAlertSink;
   readonly counters = { decisionTicks: 0, protectionTicks: 0, failedTicks: 0 };
 
   constructor(private readonly deps: RuntimeDeps, private readonly options: RuntimeOptions = {}) {
     if (deps.config.mode !== 'shadow' && !deps.kraken) throw new Error(`Modalità ${deps.config.mode} senza execution layer Kraken`);
     if (deps.config.mode === 'shadow' && deps.kraken) throw new Error('In shadow il runtime non riceve l execution layer Kraken');
     this.startedAt = deps.now();
+    this.alertSink = deps.alerts instanceof RecordingAlertSink ? deps.alerts : new RecordingAlertSink(deps.alerts);
+  }
+
+  get recentAlerts(): readonly Alert[] {
+    return this.alertSink.recent;
   }
 
   get mode(): TradingMode {
@@ -140,19 +186,39 @@ export class BotRuntime {
     return run;
   }
 
-  private log(level: 'info' | 'warn' | 'error', message: string): void {
-    this.deps.log?.(level, message);
+  private get logger(): Logger {
+    return (this.deps.logger ??= Logger.silent());
+  }
+
+  private log(level: LogLevel, message: string, context?: Record<string, unknown>): void {
+    this.logger.log(level, message, context);
+  }
+
+  /** Esegue `fn` in esclusiva con un correlation id di ciclo (D decisione, P protezione, K kill switch, R recovery, C controllo). */
+  private inCycle<T>(kind: 'D' | 'P' | 'K' | 'R' | 'C', fn: () => Promise<T>): Promise<T> {
+    return this.exclusive(async () => {
+      const cycle = this.deps.cycle;
+      if (cycle) cycle.current = `${kind}-${new Date(this.deps.now()).toISOString().replace(/[-:.]/g, '').slice(0, 15)}Z`;
+      try {
+        return await fn();
+      } finally {
+        if (cycle) cycle.current = null;
+      }
+    });
   }
 
   private async alert(level: AlertLevel, code: AlertCode, message: string, context?: Record<string, unknown>): Promise<void> {
     const alert = makeAlert(this.deps.now(), level, code, message, context);
-    this.recentAlerts.push(alert);
-    if (this.recentAlerts.length > 100) this.recentAlerts.splice(0, this.recentAlerts.length - 100);
     try {
-      await this.deps.alerts.send(alert);
+      await this.alertSink.send(alert);
     } catch (err) {
       this.log('error', `Invio dell'alert ${code} fallito: ${(err as Error).message}`);
     }
+  }
+
+  /** Alert da componenti esterni al runtime (heartbeat, prova del canale): stessa coda e stesso canale. */
+  raiseAlert(level: AlertLevel, code: AlertCode, message: string, context?: Record<string, unknown>): Promise<void> {
+    return this.alert(level, code, message, context);
   }
 
   private coreConfig(): CoreConfig {
@@ -174,7 +240,7 @@ export class BotRuntime {
 
   /** Porta il runtime in RUNNING eseguendo i passi di recovery mancanti. Idempotente. */
   ensureRunning(): Promise<RuntimeStatus> {
-    return this.exclusive(() => this.recover());
+    return this.inCycle('R', () => this.recover());
   }
 
   private async recover(): Promise<RuntimeStatus> {
@@ -255,7 +321,7 @@ export class BotRuntime {
       if (snap && snap.port.kind !== 'kraken') throw new Error('Stato persistito di un altro tipo di esecuzione (shadow): non riutilizzabile in demo/live');
       const portState = snap && snap.port.kind === 'kraken' ? snap.port.state : initialKrakenPortState();
       this.port = new KrakenExecutionPort(
-        { mode: this.mode, adapter: kraken.adapter, orders: kraken.orders, stops: kraken.stops, instruments: kraken.instruments, alerts: this.deps.alerts, funding: kraken.funding, now: this.deps.now },
+        { mode: this.mode, adapter: kraken.adapter, orders: kraken.orders, stops: kraken.stops, instruments: kraken.instruments, alerts: this.alertSink, funding: kraken.funding, now: this.deps.now },
         kraken.portConfig,
         portState,
       );
@@ -386,7 +452,7 @@ export class BotRuntime {
 
   /** Kill switch: da API, dashboard o flag. Idempotente: una seconda richiesta non ne avvia un'altra. */
   killSwitch(source: string): Promise<{ opState: OperationalState; steps: string[] }> {
-    return this.exclusive(async () => {
+    return this.inCycle('K', async () => {
       if (this.status !== 'RUNNING') {
         throw new Error(`Kill switch non eseguibile: runtime ${this.status}. In emergenza POST /api/emergency-kraken-transfer chiude le posizioni direttamente su Kraken`);
       }
@@ -439,7 +505,7 @@ export class BotRuntime {
 
   /** Ripresa da REDUCE_ONLY o HALTED: solo con conferma esplicita di una persona. */
   resumeRisk(confirmation: string): Promise<OperationalState> {
-    return this.exclusive(async () => {
+    return this.inCycle('C', async () => {
       if (confirmation !== RESUME_CONFIRMATION) throw new Error(`Conferma mancante: inviare "${RESUME_CONFIRMATION}"`);
       if (this.risk.opState === 'HALTING') throw new Error('Kill switch in corso: attendere HALTED');
       // Da RUNNING non c'è nulla da riprendere (e il riferimento del drawdown non si sposta).
@@ -470,7 +536,7 @@ export class BotRuntime {
   // --- Cicli ------------------------------------------------------------------------------------
 
   decisionTick(now: number): Promise<TickResult | null> {
-    return this.exclusive(async () => {
+    return this.inCycle('D', async () => {
       if (this.status !== 'RUNNING' && (await this.recover()) !== 'RUNNING') return null;
       if (this.deps.lease.canWrite() !== null && !(await this.deps.lease.renew())) {
         await this.onLeaseLost();
@@ -498,8 +564,13 @@ export class BotRuntime {
 
   private async afterTick(result: TickResult): Promise<void> {
     const store = this.deps.store;
+    for (const intent of result.intents) {
+      const detail = intent.kind === 'OPEN' ? `${intent.direction} size ${intent.size} leva ${intent.leverage}x rif. ${intent.referencePrice}` : intent.kind === 'CLOSE' ? `${intent.exitType} rif. ${intent.referencePrice}` : `stop ${intent.strategyStop} backstop ${intent.backstop}`;
+      this.log('info', `Intento ${intent.kind} ${intent.symbol}: ${detail}`, { positionId: intent.positionId, symbol: intent.symbol });
+    }
     for (const trade of result.trades) {
       const positionId = `${trade.symbol.split('/')[0]}-${trade.entryTime}`;
+      this.log('info', `Trade chiuso ${trade.symbol} ${trade.type} (${trade.reason}): ${trade.pnl.toFixed(2)} $`, { positionId, pnl: trade.pnl, reason: trade.reason });
       this.recentTrades.unshift(trade);
       try {
         await store.appendTrade(positionId, trade);
@@ -548,7 +619,7 @@ export class BotRuntime {
   }
 
   protectionTick(now: number): Promise<void> {
-    return this.exclusive(async () => {
+    return this.inCycle('P', async () => {
       if (this.status !== 'RUNNING' && (await this.recover()) !== 'RUNNING') return;
       if (!(await this.deps.lease.renew())) {
         await this.onLeaseLost();
@@ -654,7 +725,7 @@ export class BotRuntime {
   // --- Controllo ----------------------------------------------------------------------------------
 
   pause(): Promise<void> {
-    return this.exclusive(async () => {
+    return this.inCycle('C', async () => {
       this.paused = true;
       await this.persist();
       await this.alert('info', 'MODE_CHANGE', 'Bot in pausa: nessun nuovo ingresso, uscite e stop attivi');
@@ -662,7 +733,7 @@ export class BotRuntime {
   }
 
   resume(): Promise<void> {
-    return this.exclusive(async () => {
+    return this.inCycle('C', async () => {
       this.paused = false;
       await this.persist();
       await this.alert('info', 'MODE_CHANGE', 'Bot ripreso');
@@ -671,7 +742,7 @@ export class BotRuntime {
 
   /** Solo shadow: riparte da uno stato nuovo. Con ordini reali lo stato non si azzera mai (D28, D34). */
   reset(): Promise<void> {
-    return this.exclusive(async () => {
+    return this.inCycle('C', async () => {
       if (this.mode !== 'shadow') throw new Error('Reset non consentito in demo e live');
       // Lo stato salvato va eliminato: il recovery lo rileggerebbe dopo aver preso il lease.
       await this.deps.store.deleteSnapshot();
@@ -689,7 +760,7 @@ export class BotRuntime {
   }
 
   stop(): Promise<void> {
-    return this.exclusive(async () => {
+    return this.inCycle('C', async () => {
       await this.persist();
       this.status = 'STOPPED';
       await this.deps.lease.release().catch(() => undefined);
@@ -698,15 +769,76 @@ export class BotRuntime {
 
   // --- Stato per l'API e la dashboard (solo dati reali, nessuna chiamata esterna) ------------------
 
+  /** Protezione di ogni posizione del core: stop nativo su Kraken o stop simulato in shadow. */
+  private positionsHealth(): PositionHealth[] {
+    const book = this.port instanceof KrakenExecutionPort ? this.port.state.positions : null;
+    const sim = this.port instanceof SimExecutionPort ? this.port.exchange : null;
+    return (this.cycle?.openPositions() ?? []).map((p) => {
+      const entry = book?.[p.id];
+      const protection: ProtectionStatus = book ? (entry ? (entry.unprotectedSince === null ? 'NATIVE_STOP_OK' : 'UNPROTECTED') : 'PENDING') : 'SIMULATED';
+      return {
+        id: p.id,
+        symbol: p.symbol,
+        direction: p.trade.direction,
+        size: p.trade.size,
+        protection,
+        stopLevel: entry ? (entry.stopOnExchange ?? null) : sim ? sim.restingStop(p.id) : null,
+        unprotectedSince: entry?.unprotectedSince ? new Date(entry.unprotectedSince).toISOString() : null,
+      };
+    });
+  }
+
+  /** Health per l'endpoint autenticato: modalità, lease, età dei dati, cicli, protezione, errori recenti. */
+  health(heartbeat: HeartbeatStatus | null = null): HealthReport {
+    const now = this.deps.now();
+    const lastSlot = this.cycle?.state.lastSlot ?? null;
+    const ageMs = lastSlot === null ? null : now - slotEnd(lastSlot);
+    const stale = (ageMs ?? now - this.startedAt) > (this.options.staleDataMs ?? 30 * 60_000);
+    const lease = this.deps.lease.lease;
+    const leaseReason = this.deps.lease.canWrite();
+    const positions = this.positionsHealth();
+    const unknown = this.port instanceof KrakenExecutionPort ? Object.values(this.port.state.unknownPositions) : [];
+    const allProtected = positions.every((p) => p.protection === 'NATIVE_STOP_OK' || p.protection === 'SIMULATED');
+    const issues: string[] = [];
+    if (this.status !== 'RUNNING') issues.push(`runtime ${this.status}${this.lastError ? `: ${this.lastError}` : ''}`);
+    if (leaseReason !== null) issues.push(`lease: ${leaseReason}`);
+    if (stale) issues.push(ageMs === null ? 'nessuna candela ricevuta dall avvio' : `dati fermi da ${Math.round(ageMs / 60_000)} min`);
+    for (const p of positions.filter((x) => x.protection === 'UNPROTECTED' || x.protection === 'PENDING')) issues.push(`posizione ${p.id} ${p.protection === 'PENDING' ? 'in attesa di conferma' : 'senza stop nativo'}`);
+    if (unknown.length > 0) issues.push(`${unknown.length} posizioni sconosciute sul conto`);
+    if (!this.persistenceHealthy) issues.push('persistenza non disponibile');
+    if (heartbeat && !heartbeat.healthy) issues.push(...heartbeat.issues);
+    const fromLogs = this.logger.recentProblems(20).map((r) => ({ at: r.at, source: 'log' as const, level: r.level, message: r.message }));
+    const fromAlerts = this.recentAlerts.filter((a) => a.level !== 'info').slice(-20).map((a) => ({ at: a.at, source: 'alert' as const, level: a.level, message: a.message, code: a.code }));
+    return {
+      healthy: issues.length === 0,
+      issues,
+      at: new Date(now).toISOString(),
+      mode: this.mode,
+      runtimeStatus: this.status,
+      operationalState: this.risk.opState,
+      paused: this.paused,
+      entryBlock: this.status === 'RUNNING' ? this.entryBlockReason() : this.status,
+      lease: { holder: lease?.holder ?? null, epoch: lease?.epoch ?? null, expiresAt: lease ? new Date(lease.expiresAt).toISOString() : null, valid: leaseReason === null, reason: leaseReason },
+      data: { lastSlot: lastSlot === null ? null : new Date(lastSlot).toISOString(), ageMs, stale },
+      cycles: { lastDecisionAt: this.lastDecisionAt === null ? null : new Date(this.lastDecisionAt).toISOString(), ...this.counters },
+      heartbeat,
+      positions,
+      unknownPositions: unknown.map((u) => ({ symbol: u.symbol, side: u.side, size: u.size, protectionId: u.protectionId })),
+      allProtected,
+      persistence: { healthy: this.persistenceHealthy, writes: this.deps.store.budget.snapshot() },
+      recentErrors: [...fromLogs, ...fromAlerts].sort((a, b) => (a.at < b.at ? 1 : -1)).slice(0, 20),
+    };
+  }
+
   statusPayload(): Record<string, unknown> {
     const now = this.deps.now();
     const core = this.cycle?.state ?? null;
     const cap = this.deps.config.limits.capitalCapUsd;
-    const krakenBook = this.port instanceof KrakenExecutionPort ? this.port.state.positions : null;
+    const protection = new Map(this.positionsHealth().map((h) => [h.id, h] as const));
     const openPositions = (this.cycle?.openPositions() ?? []).map((p) => {
       const last = core?.lastClose[p.symbol] ?? p.trade.entryPrice;
       const sign = p.trade.direction === 'LONG' ? 1 : -1;
-      const book = krakenBook?.[p.id];
+      const health = protection.get(p.id);
       return {
         id: p.id,
         symbol: p.symbol,
@@ -722,7 +854,9 @@ export class BotRuntime {
         backstop: p.backstop,
         unrealizedPnl: sign * (last - p.trade.entryPrice) * p.trade.size - p.fundingPaid,
         margin: (p.trade.size * p.trade.entryPrice) / p.trade.leverage,
-        protection: krakenBook ? (book ? (book.unprotectedSince === null ? 'NATIVE_STOP_OK' : 'UNPROTECTED') : 'PENDING') : 'SIMULATED',
+        protection: health?.protection ?? 'PENDING',
+        nativeStopLevel: health?.stopLevel ?? null,
+        lastPrice: last,
       };
     });
     const lastSlot = core?.lastSlot ?? null;

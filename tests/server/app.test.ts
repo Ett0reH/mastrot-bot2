@@ -8,7 +8,7 @@ import { createApp, tokensMatch } from '../../src/server/app';
 const ADMIN = 'A'.repeat(40);
 const CRON = 'C'.repeat(40);
 
-function startApp(env: Record<string, string>, overrides: { failWith?: Error } = {}) {
+function startApp(env: Record<string, string>, overrides: { failWith?: Error; unhealthy?: boolean } = {}) {
   const { config } = loadConfig(env);
   const calls: string[] = [];
   const act = (name: string) => async () => {
@@ -19,7 +19,10 @@ function startApp(env: Record<string, string>, overrides: { failWith?: Error } =
   const app = createApp({
     config,
     engine: {
-      status: act('status'), start: act('start'), stop: act('stop'), reset: act('reset'), cronTick: act('cron'),
+      status: act('status'), start: act('start'), stop: act('stop'), reset: act('reset'),
+      cronTick: async () => (await act('cron')(), overrides.unhealthy ? { isActive: true, healthy: false, issues: ['ciclo di protezione fermo da 120 s'] } : { isActive: true, healthy: true, issues: [] }),
+      health: act('health'),
+      testAlert: act('alert-test'),
       killSwitch: async (source: string) => (await act(`kill:${source}`)(), { opState: 'HALTED', steps: [] }),
       resumeRisk: async (confirmation: string) => (await act(`resume:${confirmation}`)(), { operationalState: 'RUNNING' }),
     },
@@ -41,8 +44,10 @@ let shadow: Awaited<ReturnType<typeof startApp>>;
 let demo: Awaited<ReturnType<typeof startApp>>;
 let noAdmin: Awaited<ReturnType<typeof startApp>>;
 let failing: Awaited<ReturnType<typeof startApp>>;
+let stalled: Awaited<ReturnType<typeof startApp>>;
 
 before(async () => {
+  stalled = await startApp({ ADMIN_TOKEN: ADMIN, CRON_TOKEN: CRON }, { unhealthy: true });
   shadow = await startApp({ ADMIN_TOKEN: ADMIN, CRON_TOKEN: CRON });
   demo = await startApp({ TRADING_MODE: 'demo', KRAKEN_DEMO_API_KEY: 'k', KRAKEN_DEMO_API_SECRET: 's', ADMIN_TOKEN: ADMIN });
   noAdmin = await startApp({});
@@ -50,7 +55,7 @@ before(async () => {
 });
 
 after(() => {
-  for (const s of [shadow, demo, noAdmin, failing]) s.server.close();
+  for (const s of [shadow, demo, noAdmin, failing, stalled]) s.server.close();
 });
 
 const protectedRoutes: [string, string][] = [
@@ -62,6 +67,8 @@ const protectedRoutes: [string, string][] = [
   ['POST', '/api/emergency-kraken-transfer'],
   ['POST', '/api/kill-switch'],
   ['POST', '/api/risk/resume'],
+  ['GET', '/api/health/details'],
+  ['POST', '/api/alerts/test'],
 ];
 
 test('le API di controllo senza token rispondono 401 e non toccano il motore', async () => {
@@ -112,6 +119,24 @@ test('cron: senza token 401, con token in header o query 200; senza CRON_TOKEN c
   assert.equal((await fetch(noAdmin.base + '/api/cron/tick')).status, 503);
 });
 
+test('cron: heartbeat mancante → 503 con i problemi (anche il servizio di cron lo vede)', async () => {
+  const res = await fetch(stalled.base + '/api/cron/tick', { headers: auth(CRON) });
+  assert.equal(res.status, 503);
+  const body = await res.json();
+  assert.equal(body.healthy, false);
+  assert.deepEqual(body.issues, ['ciclo di protezione fermo da 120 s']);
+  const ok = await fetch(shadow.base + '/api/cron/tick', { headers: auth(CRON) });
+  assert.equal((await ok.json()).healthy, true);
+});
+
+test('health dettagliato e alert di prova solo con token admin (F6)', async () => {
+  assert.equal((await fetch(shadow.base + '/api/health/details')).status, 401);
+  const res = await fetch(shadow.base + '/api/health/details', { headers: auth(ADMIN) });
+  assert.equal(res.status, 200);
+  assert.equal((await fetch(shadow.base + '/api/alerts/test', { method: 'POST', headers: auth(ADMIN) })).status, 200);
+  assert.ok(shadow.calls.includes('health') && shadow.calls.includes('alert-test'));
+});
+
 test('in shadow le operazioni Kraken sono rifiutate (409) anche con token valido', async () => {
   for (const [method, path] of [['GET', '/api/debug-kraken'], ['POST', '/api/emergency-kraken-transfer']] as const) {
     const res = await fetch(shadow.base + path, { method, headers: auth(ADMIN) });
@@ -137,7 +162,8 @@ test('gli errori non espongono lo stack trace', async () => {
 test('rotte pubbliche e rimosse', async () => {
   assert.equal((await fetch(shadow.base + '/api/health')).status, 200);
   assert.equal((await fetch(shadow.base + '/api/system/backtest')).status, 200);
-  for (const path of ['/api/generate', '/api/admin/toggle-degraded', '/api/firebase-status', '/api/data/BTC.json']) {
+  // /api/system/state restituiva dati finti (D31): rimosso.
+  for (const path of ['/api/generate', '/api/admin/toggle-degraded', '/api/firebase-status', '/api/data/BTC.json', '/api/system/state']) {
     const res = await fetch(shadow.base + path, { method: path === '/api/generate' ? 'POST' : 'GET' });
     assert.equal(res.status, 404, path);
   }

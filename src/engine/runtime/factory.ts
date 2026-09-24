@@ -11,7 +11,8 @@ import { FundingFromLedgerPending } from '../exchange/krakenExecutionPort';
 import { OrderManager } from '../exchange/orderManager';
 import { StopManager } from '../exchange/stopManager';
 import { KrakenCandleSource } from '../live/krakenCandleSource';
-import type { AlertSink } from '../ops/alerts';
+import { type AlertSink, RecordingAlertSink } from '../ops/alerts';
+import type { CycleContext, Logger } from '../ops/logger';
 import { BotStore, WriteBudget } from '../persistence/botStore';
 import { type DocumentStore, MemoryDocumentStore } from '../persistence/documentStore';
 import { createFirestore } from '../persistence/firebase';
@@ -44,7 +45,9 @@ async function probe(docs: DocumentStore, timeoutMs: number): Promise<void> {
   }
 }
 
-export async function createBotRuntime(config: EngineConfig, alerts: AlertSink, log: (level: 'info' | 'warn' | 'error', message: string) => void): Promise<RuntimeBundle> {
+export async function createBotRuntime(config: EngineConfig, channel: AlertSink, logger: Logger, cycle?: CycleContext): Promise<RuntimeBundle> {
+  // Un solo registro degli alert per runtime, porta Kraken e StopManager (dashboard e health).
+  const alerts = new RecordingAlertSink(channel);
   const now = () => Date.now();
   const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
   let docs: DocumentStore;
@@ -56,7 +59,7 @@ export async function createBotRuntime(config: EngineConfig, alerts: AlertSink, 
     persistence = 'firestore';
   } catch (err) {
     if (config.mode !== 'shadow') throw new Error(`Persistenza obbligatoria in ${config.mode}: Firestore non disponibile (${(err as Error).message})`);
-    log('warn', `Firestore non disponibile (${(err as Error).message}): stato shadow solo in memoria`);
+    logger.warn(`Firestore non disponibile (${(err as Error).message}): stato shadow solo in memoria`);
     docs = new MemoryDocumentStore();
     persistence = 'memory';
   }
@@ -71,14 +74,14 @@ export async function createBotRuntime(config: EngineConfig, alerts: AlertSink, 
       now,
       sleep,
       canWrite: () => lease.canWrite(),
-      log: (e) => log(e.level === 'info' ? 'info' : e.level === 'warn' ? 'warn' : 'error', e.message),
+      log: (e) => logger.log(e.level, e.message, e.context),
     });
-    const orders = new OrderManager(adapter, store.orders, { now });
+    const orders = new OrderManager(adapter, store.orders, { now, logger });
     const instruments = new InstrumentRegistry(() => adapter.instruments(), now);
     const stops = new StopManager(orders, adapter, instruments, alerts, { now });
     const ledger = new AccountLedger(adapter, docs, () => budget.recordWrite());
     kraken = { adapter, orders, stops, instruments, funding: new FundingFromLedgerPending(), ledger };
   }
-  const runtime = new BotRuntime({ config, now, store, lease, source, alerts, kraken, log });
+  const runtime = new BotRuntime({ config, now, store, lease, source, alerts, kraken, logger, cycle });
   return { runtime, persistence, instanceId };
 }

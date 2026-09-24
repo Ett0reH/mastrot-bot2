@@ -8,4 +8,4 @@
 | 2022H1 dati reali, modello legacy | 163 | 52 | 104 | 31348 | 20201 | 17 | 12766 | 0 | ✅ identico |
 | 2026Q2 dati reali, modello realistico + funding | 16 | 4 | 175 | 3076 | 1916 | 1 | 1203 | 0 | ✅ identico |
 | 2026Q2 dati reali, modello legacy | 16 | 4 | 8 | 3076 | 1916 | 1 | 1203 | 0 | ✅ identico |
-| 13 mesi sintetici (seme 2), modello realistico + funding | 396 | 245 | 3365 | 75780 | 53624 | 42 | 35554 | 2184 | ✅ identico |
+| 13 mesi sintetici (seme 2), modello realistico + funding | 396 | 245 | 3365 | 76269 | 53624 | 42 | 35554 | 2184 | ✅ identico |

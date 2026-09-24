@@ -5,6 +5,7 @@
 // Le richieste HTTP e il cron esterno leggono solo lo stato.
 import { BAR_15M_MS } from '../data/dataset';
 import type { BotRuntime } from './botRuntime';
+import type { HeartbeatMonitor } from './heartbeat';
 
 export interface Timers {
   now(): number;
@@ -22,6 +23,8 @@ export interface SchedulerOptions {
   protectionIntervalMs?: number;
   decisionMarginMs?: number;
   retryMs?: number;
+  /** Heartbeat (F6): registra la fine di ogni ciclo. */
+  heartbeat?: HeartbeatMonitor;
 }
 
 export class RuntimeScheduler {
@@ -32,8 +35,10 @@ export class RuntimeScheduler {
   readonly decisionMarginMs: number;
   readonly retryMs: number;
   lastHeartbeat: number | null = null;
+  private readonly heartbeat: HeartbeatMonitor | null;
 
   constructor(private readonly runtime: BotRuntime, private readonly timers: Timers = REAL_TIMERS, options: SchedulerOptions = {}) {
+    this.heartbeat = options.heartbeat ?? null;
     this.protectionIntervalMs = options.protectionIntervalMs ?? 20_000;
     this.decisionMarginMs = options.decisionMarginMs ?? 45_000;
     this.retryMs = options.retryMs ?? 20_000;
@@ -79,6 +84,7 @@ export class RuntimeScheduler {
       retry = true;
     }
     const now = this.timers.now();
+    this.heartbeat?.beatDecision(now);
     const next = this.nextDecisionAt(now);
     this.scheduleDecision(retry ? Math.min(this.retryMs, next - now) : next - now);
   }
@@ -86,10 +92,11 @@ export class RuntimeScheduler {
   private async runProtection(): Promise<void> {
     try {
       await this.runtime.protectionTick(this.timers.now());
-      this.lastHeartbeat = this.timers.now();
     } catch {
       // l'errore è già nello stato del runtime (lastError); il ciclo continua
     }
+    this.lastHeartbeat = this.timers.now();
+    this.heartbeat?.beatProtection(this.lastHeartbeat);
     this.scheduleProtection(this.protectionIntervalMs);
   }
 }

@@ -11,7 +11,8 @@ import { FundingFromLedgerPending } from '../../src/engine/exchange/krakenExecut
 import { OrderManager } from '../../src/engine/exchange/orderManager';
 import { StopManager } from '../../src/engine/exchange/stopManager';
 import { lastClosedSlot } from '../../src/engine/live/decisionCycle';
-import { MemoryAlertSink } from '../../src/engine/ops/alerts';
+import { MemoryAlertSink, RecordingAlertSink } from '../../src/engine/ops/alerts';
+import type { CycleContext, Logger } from '../../src/engine/ops/logger';
 import { BotStore, WriteBudget } from '../../src/engine/persistence/botStore';
 import { MemoryDocumentStore } from '../../src/engine/persistence/documentStore';
 import { ReplayCandleSource } from '../../src/engine/replay/replay';
@@ -80,27 +81,43 @@ function reach(world: World, id: string, state: { alive: boolean }): FakeKrakenF
   });
 }
 
-export function makeInstance(world: World, id: string, options: { docs?: MemoryDocumentStore; mode?: 'demo' | 'shadow'; writeBudget?: number; limits?: Partial<RiskLimits> } = {}) {
+export function makeInstance(
+  world: World,
+  id: string,
+  options: {
+    docs?: MemoryDocumentStore;
+    mode?: 'demo' | 'shadow';
+    writeBudget?: number;
+    limits?: Partial<RiskLimits>;
+    logger?: Logger;
+    cycle?: CycleContext;
+    /** Lease di produzione (3 minuti, margine 60 s) invece di quello corto dei test. */
+    productionLease?: boolean;
+  } = {},
+) {
+  const { logger, cycle } = options;
   const docs = options.docs ?? world.docs;
   const base = options.mode === 'shadow' ? SHADOW_CONFIG : DEMO_CONFIG;
   const config = options.limits ? { ...base, limits: { ...base.limits, ...options.limits } } : base;
   const now = world.now;
   const budget = new WriteBudget(options.writeBudget ?? 5_000, now);
   const store = new BotStore(docs, budget, now);
-  const lease = new LeaseManager(docs, id, { now, ttlMs: 60_000, safetyMarginMs: 20_000, onWrite: () => budget.recordWrite() });
+  const timing = options.productionLease ? {} : { ttlMs: 60_000, safetyMarginMs: 20_000 };
+  const lease = new LeaseManager(docs, id, { now, ...timing, onWrite: () => budget.recordWrite() });
   const alerts = new MemoryAlertSink();
   const state = { alive: true };
   const source = new ReplayCandleSource(world.data, now, () => 20_000);
   if (options.mode === 'shadow') {
-    const runtime = new BotRuntime({ config, now, store, lease, source, alerts }, { startMs: world.startMs });
+    const runtime = new BotRuntime({ config, now, store, lease, source, alerts, logger, cycle }, { startMs: world.startMs });
     return { id, runtime, store, lease, alerts, docs, state, orders: null };
   }
   const adapter = new KrakenAdapter(reach(world, id, state), { now, sleep: world.sleep, canWrite: () => lease.canWrite() });
-  const orders = new OrderManager(adapter, store.orders, { now });
+  const orders = new OrderManager(adapter, store.orders, { now, logger });
   const instruments = new InstrumentRegistry(() => adapter.instruments(), now);
-  const stops = new StopManager(orders, adapter, instruments, alerts, { now });
+  const recorded = new RecordingAlertSink(alerts);
+  const stops = new StopManager(orders, adapter, instruments, recorded, { now });
   const runtime = new BotRuntime(
-    { config, now, store, lease, source, alerts, kraken: { adapter, orders, stops, instruments, funding: new FundingFromLedgerPending(), ledger: new AccountLedger(adapter, docs, () => budget.recordWrite()) } },
+    { config, now, store, lease, source, alerts: recorded, logger, cycle, kraken: { adapter, orders, stops, instruments, funding: new FundingFromLedgerPending(), ledger: new AccountLedger(adapter, docs, () => budget.recordWrite()) } },
     { startMs: world.startMs },
   );
   return { id, runtime, store, lease, alerts, docs, state, orders };

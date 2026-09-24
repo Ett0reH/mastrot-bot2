@@ -10,6 +10,7 @@
 // 4. Un nuovo tentativo (nuovo cliOrdId, attempt + 1) è ammesso solo per un ordine che la
 //    riconciliazione ha dimostrato senza effetti (REJECTED, o CANCELED senza fill).
 import type { FuturesFill, FuturesOpenOrder, FuturesOrderStatusInfo, FuturesSendOrderParams, FuturesSendOrderStatus } from '@siebly/kraken-api';
+import type { Logger } from '../ops/logger';
 import type { KrakenAdapter, Priority } from './krakenAdapter';
 import {
   assertTransition,
@@ -43,7 +44,12 @@ export interface OrderManagerOptions {
   processWindowMs?: number;
   /** Margine dopo processBefore prima di concludere che un ordine senza tracce non è stato elaborato. */
   graceMs?: number;
+  /** Log strutturato di ogni transizione (correlation id: cliOrdId, positionId). */
+  logger?: Logger;
 }
+
+/** Scopi il cui intentKey è l'id della posizione del core. */
+const POSITION_PURPOSES = new Set<OrderPurpose>(['ENTRY', 'EXIT', 'STOP']);
 
 /** Status di sendorder che confermano l'accettazione (FuturesSendOrderStatus.status). */
 const ACCEPTED = new Set(['placed', 'partiallyFilled', 'filled']);
@@ -67,6 +73,13 @@ export class OrderManager {
 
   private async transition(record: OrderRecord, to: OrderState, note: string): Promise<void> {
     assertTransition(record.state, to);
+    const from = record.state;
+    this.options.logger?.log(to === 'UNKNOWN' || to === 'REJECTED' ? 'warn' : 'info', `Ordine ${record.purpose} ${record.symbol} ${record.side} ${record.size}: ${from} → ${to} (${note})`, {
+      cliOrdId: record.cliOrdId,
+      ...(POSITION_PURPOSES.has(record.purpose) ? { positionId: record.intentKey } : { intentKey: record.intentKey }),
+      symbol: record.symbol,
+      state: to,
+    });
     record.state = to;
     record.updatedAt = this.iso(this.options.now());
     record.history.push({ at: record.updatedAt, state: to, note });
@@ -208,6 +221,7 @@ export class OrderManager {
     record: OrderRecord,
     snapshot: { statuses: FuturesOrderStatusInfo[]; openOrders: FuturesOpenOrder[]; fills: FuturesFill[] },
   ): Promise<OrderRecord> {
+    const before = { fills: record.fills.length, exchangeOrderId: record.exchangeOrderId };
     const own = snapshot.fills.filter((f) => f.cliOrdId === record.cliOrdId || (record.exchangeOrderId !== null && f.order_id === record.exchangeOrderId));
     this.mergeFills(record, own.map((f) => ({ fillId: f.fill_id, price: f.price, size: f.size, time: f.fillTime })));
     if (own.length > 0 && record.exchangeOrderId === null) record.exchangeOrderId = own[0].order_id;
@@ -216,12 +230,20 @@ export class OrderManager {
     const open = snapshot.openOrders.find((o) => o.cliOrdId === record.cliOrdId || (record.exchangeOrderId !== null && o.order_id === record.exchangeOrderId));
     const full = record.filledSize >= record.size;
     const target = this.targetState(record, info ?? null, open ?? null, full);
-    if (target === null) {
-      await this.store.save(record);
+    if (target !== null) {
+      if (info?.order.orderId) record.exchangeOrderId = info.order.orderId;
+      else if (open) record.exchangeOrderId = open.order_id;
+    }
+    const changed = record.fills.length !== before.fills || record.exchangeOrderId !== before.exchangeOrderId;
+    // Stato invariato (es. uno stop aperto riconciliato a ogni ciclo di protezione): nessuna voce di
+    // storico e nessuna scrittura se non è cambiato nulla (D44).
+    if (target === null || target.state === record.state) {
+      if (changed) {
+        record.updatedAt = this.iso(this.options.now());
+        await this.store.save(record);
+      }
       return record;
     }
-    if (info?.order.orderId) record.exchangeOrderId = info.order.orderId;
-    else if (open) record.exchangeOrderId = open.order_id;
     await this.transition(record, target.state, target.note);
     return record;
   }

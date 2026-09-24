@@ -18,8 +18,12 @@ export interface EngineControlApi {
   stop(): Promise<unknown>;
   /** Solo shadow: stato nuovo. */
   reset(): Promise<unknown>;
-  /** Heartbeat per il cron esterno: verifica che il processo sia vivo, non esegue logica. */
-  cronTick(): Promise<{ isActive: boolean }>;
+  /** Heartbeat per il cron esterno: verifica che i cicli del runtime girino (503 se no), non esegue logica. */
+  cronTick(): Promise<{ isActive: boolean; healthy?: boolean; issues?: string[] }>;
+  /** Health dettagliato (F6): modalità, lease, età dei dati, cicli, protezione delle posizioni, errori recenti. */
+  health(): Promise<unknown>;
+  /** Invia un alert di prova sul canale configurato e ne riporta l'esito. */
+  testAlert(): Promise<unknown>;
   /** Kill switch (F5): chiude tutto, verifica il conto flat, ferma il bot. Idempotente. */
   killSwitch(source: string): Promise<unknown>;
   /** Ripresa da REDUCE_ONLY o HALTED con la frase di conferma. */
@@ -56,24 +60,6 @@ function bearerToken(req: Request): string | null {
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
-
-// Stato di sistema mostrato dalla dashboard: dati statici, sostituiti da dati reali in F6 (D31).
-const SYSTEM_STATE_PLACEHOLDER = {
-  session: 'HEALTHY',
-  marketStream: 'HEALTHY',
-  userStream: 'HEALTHY',
-  driftMs: 12,
-  modelFreshnessMs: 400,
-  regime: 'NORMAL',
-  confidence: 0.85,
-  uncertainty: false,
-  equity: 10000.0,
-  cash: 0.0,
-  positions: 0,
-  orders: 0,
-  degradedModes: [] as string[],
-  errors: [] as string[],
-};
 
 export function createApp(deps: AppDeps): express.Express {
   const { config } = deps;
@@ -129,12 +115,9 @@ export function createApp(deps: AppDeps): express.Express {
   };
 
   // --- Pubbliche ---
+  // Solo liveness del processo (per il load balancer): i dettagli stanno in /api/health/details.
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', mode: config.mode });
-  });
-
-  app.get('/api/system/state', (_req, res) => {
-    res.json({ ...SYSTEM_STATE_PLACEHOLDER, lastReconciliation: new Date().toISOString(), tradingMode: config.mode });
   });
 
   app.get('/api/system/backtest', (_req, res) => {
@@ -152,6 +135,10 @@ export function createApp(deps: AppDeps): express.Express {
   app.post('/api/paper-trading/stop', requireAdmin, run('stop', () => deps.engine.stop()));
   app.post('/api/paper-trading/reset', requireAdmin, run('reset', () => deps.engine.reset()));
 
+  // --- Osservabilità (F6) ---
+  app.get('/api/health/details', requireAdmin, run('health', () => deps.engine.health()));
+  app.post('/api/alerts/test', requireAdmin, run('alert-test', () => deps.engine.testAlert()));
+
   // --- Guardrail (F5): kill switch e ripresa manuale ---
   app.post('/api/kill-switch', requireAdmin, run('kill-switch', () => deps.engine.killSwitch('api')));
   app.post('/api/risk/resume', requireAdmin, run('risk-resume', (req) => deps.engine.resumeRisk(typeof req.body?.confirm === 'string' ? req.body.confirm : '')));
@@ -164,10 +151,16 @@ export function createApp(deps: AppDeps): express.Express {
   }));
 
   // --- Cron (token dedicato): solo heartbeat, il motore gira con il proprio scheduler (D24) ---
-  app.get('/api/cron/tick', requireCron, run('cron-tick', async () => {
-    const state = await deps.engine.cronTick();
-    return { message: 'heartbeat', ...state };
-  }));
+  // 503 se i cicli del runtime sono fermi: anche il servizio di cron vede il problema.
+  app.get('/api/cron/tick', requireCron, async (_req, res) => {
+    try {
+      const state = await deps.engine.cronTick();
+      res.status(state.healthy === false ? 503 : 200).json({ message: 'heartbeat', ...state });
+    } catch (error) {
+      logError('[API] cron-tick fallita', error);
+      res.status(500).json({ error: errorMessage(error) });
+    }
+  });
 
   // Rotte /api sconosciute: 404 JSON (non la pagina della SPA).
   app.use('/api', (_req, res) => {

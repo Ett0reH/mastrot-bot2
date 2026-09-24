@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { lastClosedSlot } from '../../src/engine/live/decisionCycle';
 import { MemoryAlertSink } from '../../src/engine/ops/alerts';
+import type { OrderRecord } from '../../src/engine/exchange/orders';
 import { BotStore, WriteBudget } from '../../src/engine/persistence/botStore';
 import { MemoryDocumentStore } from '../../src/engine/persistence/documentStore';
 import { ReplayCandleSource } from '../../src/engine/replay/replay';
@@ -42,6 +43,22 @@ test('scritture Firestore in shadow su 24 ore (parametri di produzione): sotto i
   assert.ok(writes >= 96, 'almeno un salvataggio dello stato per slot');
   assert.equal(counted, docs.writes, 'ogni scrittura sull archivio è contata dal budget (lease compreso)');
   console.log(`# scritture Firestore misurate in shadow su 24 h: ${writes} (budget ${SHADOW_CONFIG.persistence.dailyWriteBudget})`);
+});
+
+test('scritture Firestore in demo su 24 ore con posizioni aperte (D44): gli stop riconciliati non riscrivono l ordine', async () => {
+  const world = makeWorld();
+  const a = makeInstance(world, 'A', { writeBudget: SHADOW_CONFIG.persistence.dailyWriteBudget, productionLease: true });
+  await a.runtime.ensureRunning();
+  const before = world.docs.writes;
+  // Protezione ogni 20 s e decisione a ogni slot, come lo scheduler reale.
+  for (const t of tickTimes(world.startMs, world.startMs + 24 * 60 * MIN)) await step(world, [a], t, true);
+  const writes = world.docs.writes - before;
+  const orders = (await world.docs.query<OrderRecord>('orders', [])).map((d) => d.data);
+  const stop = orders.find((o) => o.purpose === 'STOP' && o.symbol === 'PF_SOLUSD');
+  assert.ok(stop, 'SOL è rimasta aperta per ore con il suo stop');
+  assert.ok(stop.history.length <= 6, `storico dello stop: ${stop.history.length} voci`);
+  assert.ok(writes <= SHADOW_CONFIG.persistence.dailyWriteBudget, `scritture in 24 h in demo: ${writes}`);
+  console.log(`# scritture Firestore misurate in demo su 24 h (con posizioni aperte): ${writes}`);
 });
 
 test('pausa: nessun nuovo ingresso, uscite e stop nativi restano attivi; ripresa', async () => {

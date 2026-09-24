@@ -292,6 +292,13 @@ export class DecisionCore {
     return out;
   }
 
+  /** Perché un simbolo non ha lo snapshot all'ora (per il journal). */
+  private noDataReason(symbol: string, slotTime: number): string {
+    const agg = this.aggregators[symbol];
+    if (agg.lastCandleTime !== slotTime) return `candela ${new Date(slotTime).toISOString()} mancante`;
+    return `storico insufficiente (${agg.bars1H.length}/${FEATURE_WINDOW} barre 1H, ${agg.bars4H.length}/${FEATURE_WINDOW} barre 4H)`;
+  }
+
   /** Minuti dall'ultima candela precedente; definito per ogni simbolo che ha ricevuto candele. */
   private gapOf(symbol: string): number {
     const gap = this.state.lastGapMinutes[symbol];
@@ -325,7 +332,12 @@ export class DecisionCore {
     for (const symbol of this.config.symbols) {
       const pos = this.state.positions[symbol];
       const snap = snapshots[symbol];
-      if (!pos || !snap) continue;
+      if (!pos) continue;
+      if (!snap) {
+        // Nessuna valutazione senza dati: stop della strategia e backstop restano quelli dell'ora prima.
+        journal.push({ slotTime, symbol, action: 'NO_DATA', reason: `${this.noDataReason(symbol, slotTime)}: posizione non valutata, stop invariati`, direction: pos.trade.direction as Direction, engine: pos.trade.engine });
+        continue;
+      }
       // Uscita già decisa e in attesa di esito dall'exchange (solo live): non si ridecide.
       if (this.state.pendingCloses[pos.id]) {
         journal.push({ slotTime, symbol, action: 'PENDING_ORDER', reason: 'uscita in attesa di esito', direction: pos.trade.direction as Direction, regime: snap.regime, price: snap.features.price, engine: pos.trade.engine });
@@ -385,7 +397,11 @@ export class DecisionCore {
     const pendingOpenSymbols = new Set(Object.values(this.state.pendingOpens).map((o) => o.symbol));
     for (const symbol of this.config.symbols) {
       const snapshot = snapshots[symbol];
-      if (!snapshot || !capital) continue;
+      if (!snapshot) {
+        if (!this.state.positions[symbol]) journal.push({ slotTime, symbol, action: 'NO_DATA', reason: `${this.noDataReason(symbol, slotTime)}: nessun ingresso valutato` });
+        continue;
+      }
+      if (!capital) continue;
       if (this.state.positions[symbol] && !closing.has(symbol)) continue;
       // Ingresso precedente in attesa di esito (solo live): al massimo una posizione per simbolo (I6).
       if (pendingOpenSymbols.has(symbol)) {
