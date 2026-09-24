@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { ConfigError, DEFAULT_LIMITS, LIVE_CONFIRM_PHRASE, describeConfig, loadConfig } from '../../src/engine/config/config';
 import { krakenClientOptions } from '../../src/engine/config/runtime';
+import { firestoreTarget } from '../../src/engine/persistence/firebase';
 
 const TOKEN = 'a'.repeat(32);
 const CRON = 'c'.repeat(32);
@@ -140,4 +144,23 @@ test('describeConfig non contiene segreti', () => {
 test('le virgolette aggiunte dai pannelli dei segreti vengono tolte', () => {
   const { config } = loadConfig({ ADMIN_TOKEN: `"${TOKEN}"` });
   assert.equal(config.auth.adminToken, TOKEN);
+});
+
+test('FIRESTORE_DATABASE_ID: un database per modalità senza toccare il file del repository (D51)', () => {
+  assert.equal(loadConfig({}).config.firebase.databaseId, null);
+  const { config } = loadConfig({ FIRESTORE_DATABASE_ID: 'mastrot-demo' });
+  assert.equal(config.firebase.databaseId, 'mastrot-demo');
+  assert.match(describeConfig(config), /database Firestore=mastrot-demo/);
+  assert.match(describeConfig(loadConfig({}).config), /database Firestore=quello di firebase-applet-config\.json/);
+  expectProblems({ FIRESTORE_DATABASE_ID: 'nome con spazi' }, 'FIRESTORE_DATABASE_ID');
+  expectProblems({ FIRESTORE_DATABASE_ID: 'a/b' }, 'FIRESTORE_DATABASE_ID');
+
+  const dir = mkdtempSync(join(tmpdir(), 'firebase-'));
+  try {
+    writeFileSync(join(dir, 'firebase-applet-config.json'), JSON.stringify({ projectId: 'progetto', firestoreDatabaseId: 'dal-file' }));
+    assert.deepEqual(firestoreTarget(loadConfig({}).config, dir), { projectId: 'progetto', databaseId: 'dal-file' });
+    assert.deepEqual(firestoreTarget(config, dir), { projectId: 'progetto', databaseId: 'mastrot-demo' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

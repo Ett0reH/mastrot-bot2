@@ -56,6 +56,8 @@ export interface EngineConfig {
   };
   firebase: {
     serviceAccountJson: string | null;
+    /** Database Firestore di questa istanza (uno per modalità); null = quello di firebase-applet-config.json. */
+    databaseId: string | null;
   };
   persistence: {
     /** Scritture giornaliere massime su Firestore (oltre, si sospendono journal ed equity). */
@@ -219,6 +221,10 @@ export function loadConfig(env: Env): { config: EngineConfig; warnings: string[]
   }
   if (!cronToken && read(env, 'CRON_TOKEN') === undefined) warnings.push('CRON_TOKEN non impostato: /api/cron/tick è disabilitato');
 
+  // --- Persistenza: database Firestore (uno per modalità: lo stato di un bot non va mai condiviso) ---
+  const databaseId = read(env, 'FIRESTORE_DATABASE_ID') ?? null;
+  if (databaseId !== null && /[\s/]/.test(databaseId)) problems.push('FIRESTORE_DATABASE_ID non valido: niente spazi né "/"');
+
   const config: EngineConfig = {
     mode,
     ordersEnabled: mode !== 'shadow',
@@ -229,7 +235,7 @@ export function loadConfig(env: Env): { config: EngineConfig; warnings: string[]
     backstopBufferPct,
     alerts: { channel, telegram, webhookUrl },
     auth: { adminToken, cronToken },
-    firebase: { serviceAccountJson: read(env, 'FIREBASE_SERVICE_ACCOUNT_JSON') ?? null },
+    firebase: { serviceAccountJson: read(env, 'FIREBASE_SERVICE_ACCOUNT_JSON') ?? null, databaseId },
     persistence: {
       dailyWriteBudget: parseNumber(env, 'FIRESTORE_DAILY_WRITE_BUDGET', 3_000, problems, (n) => Number.isInteger(n) && n >= 200, 'deve essere un intero ≥ 200'),
     },
@@ -246,5 +252,6 @@ export function describeConfig(config: EngineConfig): string {
     `simboli=${config.symbols.join(',')}`,
     `limiti: capitale ${l.capitalCapUsd}$, leva ≤ ${l.maxLeverage}x, nozionale ≤ ${l.maxPositionNotionalUsd}$, posizioni ≤ ${l.maxOpenPositions}, perdita giornaliera ≤ ${l.maxDailyLossPct}%, reduce-only da DD ${l.drawdownReduceOnlyPct}%`,
     `stop=${config.stopModel} (backstop ${config.backstopBufferPct}%) alert=${config.alerts.channel} admin=${config.auth.adminToken ? 'configurato' : 'disabilitato'} cron=${config.auth.cronToken ? 'configurato' : 'disabilitato'}`,
+    `database Firestore=${config.firebase.databaseId ?? 'quello di firebase-applet-config.json'}`,
   ].join('\n');
 }

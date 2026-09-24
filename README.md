@@ -21,7 +21,7 @@ Senza configurazione il bot parte in modalità **shadow**: usa dati di mercato r
 
 Il server avvia il runtime (`src/engine/runtime/`) con uno scheduler interno: il ciclo decisionale gira a ogni fine slot di 15 minuti (decisioni alla chiusura 1H UTC, come il backtest), il ciclo di protezione ogni 20 secondi (riconciliazione con Kraken, verifica degli stop). Le richieste HTTP leggono solo lo stato; il cron esterno (`/api/cron/tick`) è un heartbeat.
 
-- **Persistenza:** Firestore (stato, ordini, trade, decisioni, equity, ledger). Obbligatoria in demo e live; in shadow, se manca, lo stato resta in memoria.
+- **Persistenza:** Firestore (stato, ordini, trade, decisioni, equity, ledger). Obbligatoria in demo e live; in shadow, se manca, lo stato resta in memoria. **Un database per modalità** (`FIRESTORE_DATABASE_ID`): un'istanza che trova lo stato di un'altra modalità resta ferma (SAFE_MODE, alert `STATE_REFUSED`).
 - **Una sola istanza opera:** lease su Firestore. Un'istanza senza lease resta in STANDBY e non invia ordini.
 - **Riavvio:** carica lo stato, prende il lease, riconcilia con Kraken, verifica gli stop e riprende.
 - **Deploy:** una sola istanza sempre attiva (`deploy/cloudrun-service.yaml`: Cloud Run con min=max=1 e CPU sempre allocata) oppure una VPS con il `Dockerfile`.
@@ -40,7 +40,13 @@ La dashboard chiede l'`ADMIN_TOKEN` al primo accesso e lo salva nel browser.
 - **Log:** una riga JSON per evento, con `cycleId`, `positionId` e `cliOrdId` per seguire un'operazione dall'intento all'ordine allo stop.
 - **Alert:** `ALERT_CHANNEL=telegram` (con `TELEGRAM_BOT_TOKEN` e `TELEGRAM_CHAT_ID`) o `webhook` (`ALERT_WEBHOOK_URL`); prova del canale con `POST /api/alerts/test` o dal tab "Metriche".
 - **Health:** `GET /api/health/details` (admin). Il cron esterno su `/api/cron/tick` riceve 503 se i cicli del bot sono fermi.
-- **Report giornaliero:** a fine giorno UTC, con il confronto con il backtest sugli stessi dati; `GET /api/reports/daily` e tab "Report" della dashboard.
+- **Report giornaliero:** a fine giorno UTC, con il confronto con il backtest sugli stessi dati; `GET /api/reports/daily` e tab "Report" della dashboard. `npm run shadow:report` valuta un periodo di shadow (o di demo).
+- **Protezione ferma:** se il ciclo di protezione fallisce per 90 s (Kraken non raggiungibile, chiave revocata, rete) parte l'alert critico `PROTECTION_FAILING`.
+
+## Validazione (F7)
+
+- Scenari di caos automatizzati sull'exchange simulato (`tests/chaos/`): 503, timeout dopo l'invio, fill parziali, stop rifiutato, chiusura a mano, crash a metà ciclo, dati mancanti o in ritardo, due istanze, Kraken irraggiungibile; 96 ore di shadow con lo scheduler reale.
+- Smoke test manuale su Kraken demo: [`docs/DEMO_SMOKE_CHECKLIST.md`](docs/DEMO_SMOKE_CHECKLIST.md).
 
 ## Comandi
 
@@ -57,6 +63,7 @@ La dashboard chiede l'`ADMIN_TOKEN` al primo accesso e lo salva nel browser.
 | `npm run kraken:demo-smoke` | Smoke test dell'execution layer su Kraken **demo** (chiavi demo richieste) |
 | `npm run kraken:demo-kill -- --yes` | Prova del kill switch su Kraken **demo**: chiude tutte le posizioni del conto demo |
 | `npm run dashboard:replay` | Dashboard su dati storici reali in replay (dopo `npm run build`; badge REPLAY), per vederla senza rete verso Kraken |
+| `npm run shadow:report -- --url <bot> --days 3` | Valuta gli ultimi N giorni UTC completi dai report del bot (serve `ADMIN_TOKEN`): superato se ogni giorno ha il confronto col backtest senza divergenze non spiegate |
 | `npm run data:verify` | Verifica checksum e integrità del dataset |
 | `npm run data:download` | Ricostruisce il dataset completo da Kraken (serve rete verso futures.kraken.com) |
 | `npm run build` / `npm start` | Build di produzione e avvio |

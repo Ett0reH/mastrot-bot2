@@ -17,12 +17,16 @@ export type AlertCode =
   | 'ORDER_UNKNOWN_STATE'
   | 'STALE_DATA'
   | 'LEASE_LOST'
+  /** Ciclo di protezione (o recovery) fallito di continuo: Kraken non raggiungibile, chiavi, rete (D54). */
+  | 'PROTECTION_FAILING'
   | 'KILL_SWITCH'
   | 'HEARTBEAT_MISSING'
   | 'RISK_REJECTED'
   /** Limite di rischio superato: perdita giornaliera (blocco ingressi) o drawdown (REDUCE_ONLY). */
   | 'RISK_LIMIT'
   | 'MODE_CHANGE'
+  /** Stato salvato non utilizzabile (di un'altra modalità o non ricostruibile): il bot non opera. */
+  | 'STATE_REFUSED'
   | 'ACCOUNT_TRANSFER'
   /** Riepilogo giornaliero (F6). */
   | 'DAILY_REPORT'

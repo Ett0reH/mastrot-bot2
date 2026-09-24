@@ -15,7 +15,7 @@ import { type AlertSink, RecordingAlertSink } from '../ops/alerts';
 import type { CycleContext, Logger } from '../ops/logger';
 import { BotStore, WriteBudget } from '../persistence/botStore';
 import { type DocumentStore, MemoryDocumentStore } from '../persistence/documentStore';
-import { createFirestore } from '../persistence/firebase';
+import { createFirestore, firestoreTarget } from '../persistence/firebase';
 import { FirestoreDocumentStore } from '../persistence/firestoreStore';
 import { BotRuntime } from './botRuntime';
 import { LeaseManager } from './lease';
@@ -57,6 +57,8 @@ export async function createBotRuntime(config: EngineConfig, channel: AlertSink,
     await probe(firestore, 15_000);
     docs = firestore;
     persistence = 'firestore';
+    const target = firestoreTarget(config);
+    logger.info(`Firestore: progetto ${target.projectId}, database ${target.databaseId ?? '(default)'}`);
   } catch (err) {
     if (config.mode !== 'shadow') throw new Error(`Persistenza obbligatoria in ${config.mode}: Firestore non disponibile (${(err as Error).message})`);
     logger.warn(`Firestore non disponibile (${(err as Error).message}): stato shadow solo in memoria`);

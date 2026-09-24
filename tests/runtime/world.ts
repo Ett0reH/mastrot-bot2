@@ -1,6 +1,6 @@
 // Mondo simulato per i test del runtime (F4): archivio condiviso (come Firestore), Kraken
 // simulato, dati reali 15m, orologio virtuale e istanze del bot che possono "morire" e ripartire.
-import { loadConfig, type RiskLimits } from '../../src/engine/config/config';
+import { LIVE_CONFIRM_PHRASE, loadConfig, type RiskLimits } from '../../src/engine/config/config';
 import { REALISTIC_PROFILE } from '../../src/engine/backtest/profiles';
 import { loadBacktestData } from '../../src/engine/backtest/runner';
 import { BAR_15M_MS, type Candle, KRAKEN_NATIVE_SYMBOLS } from '../../src/engine/data/dataset';
@@ -27,6 +27,22 @@ export const SYMBOLS = GOLDEN_WINDOWS.find((w) => w.id === '2022H1')!.symbols;
 const LIMITS_10K = { CAPITAL_CAP_USD: '10000', MAX_POSITION_NOTIONAL_USD: '10000' };
 export const DEMO_CONFIG = loadConfig({ TRADING_MODE: 'demo', KRAKEN_DEMO_API_KEY: 'dk', KRAKEN_DEMO_API_SECRET: 'ds', ...LIMITS_10K }).config;
 export const SHADOW_CONFIG = loadConfig(LIMITS_10K).config;
+// Live solo con credenziali segnaposto e l'exchange simulato: mai chiavi vere nei test.
+export const LIVE_CONFIG = loadConfig({
+  TRADING_MODE: 'live',
+  KRAKEN_LIVE_API_KEY: 'placeholder-key',
+  KRAKEN_LIVE_API_SECRET: 'placeholder-secret',
+  LIVE_TRADING_CONFIRM: LIVE_CONFIRM_PHRASE,
+  ...LIMITS_10K,
+  MAX_LEVERAGE: '3',
+  MAX_OPEN_POSITIONS: '8',
+  MAX_DAILY_LOSS_PCT: '5',
+  DRAWDOWN_REDUCE_ONLY_PCT: '15',
+  ALERT_CHANNEL: 'telegram',
+  TELEGRAM_BOT_TOKEN: 'placeholder-bot-token',
+  TELEGRAM_CHAT_ID: '1',
+  ADMIN_TOKEN: 'a'.repeat(32),
+}).config;
 export const MIN = 60_000;
 
 const dataCache = new Map<string, Record<string, Candle[]>>();
@@ -86,7 +102,7 @@ export function makeInstance(
   id: string,
   options: {
     docs?: MemoryDocumentStore;
-    mode?: 'demo' | 'shadow';
+    mode?: 'demo' | 'shadow' | 'live';
     writeBudget?: number;
     limits?: Partial<RiskLimits>;
     logger?: Logger;
@@ -99,7 +115,7 @@ export function makeInstance(
 ) {
   const { logger, cycle } = options;
   const docs = options.docs ?? world.docs;
-  const base = options.mode === 'shadow' ? SHADOW_CONFIG : DEMO_CONFIG;
+  const base = options.mode === 'shadow' ? SHADOW_CONFIG : options.mode === 'live' ? LIVE_CONFIG : DEMO_CONFIG;
   const config = options.limits ? { ...base, limits: { ...base.limits, ...options.limits } } : base;
   const now = world.now;
   const budget = new WriteBudget(options.writeBudget ?? 5_000, now);
@@ -113,7 +129,7 @@ export function makeInstance(
     const runtime = new BotRuntime({ config, now, store, lease, source, alerts, logger, cycle }, { startMs: world.startMs });
     return { id, runtime, store, lease, alerts, docs, state, orders: null };
   }
-  const adapter = new KrakenAdapter(reach(world, id, state), { now, sleep: world.sleep, canWrite: () => lease.canWrite() });
+  const adapter = new KrakenAdapter(reach(world, id, state), { now, sleep: world.sleep, canWrite: () => lease.canWrite(), ...(logger ? { log: (e) => logger.log(e.level, e.message, e.context) } : {}) });
   const orders = new OrderManager(adapter, store.orders, { now, logger });
   const instruments = new InstrumentRegistry(() => adapter.instruments(), now);
   const recorded = new RecordingAlertSink(alerts);

@@ -83,7 +83,7 @@ export interface DecisionCycleDeps {
    * Salvataggio dello stato PRIMA di inviare ingressi e uscite (write-ahead): dopo un crash il
    * recovery trova gli intenti già decisi. Se fallisce, gli ingressi non partono (le uscite sì).
    */
-  checkpoint?: () => Promise<void>;
+  checkpoint?: (pending: { trades: readonly TradeRecord[] }) => Promise<void>;
 }
 
 /** Ultimo slot 15m la cui candela è chiusa al tempo `now`. */
@@ -251,7 +251,9 @@ export class DecisionCycle {
       }
       if (this.deps.checkpoint && toExecute.some((i) => i.kind !== 'UPDATE_STOP')) {
         try {
-          await this.deps.checkpoint();
+          // Anche i trade già chiusi in questo tick (es. da uno stop nativo): lo stato salvato li
+          // contiene, quindi devono essere salvati prima (D50).
+          await this.deps.checkpoint({ trades: result.trades });
         } catch (err) {
           const reason = `salvataggio dello stato fallito: ${(err as Error).message}`;
           result.events.push({ type: 'CHECKPOINT_FAILED', slot, reason });

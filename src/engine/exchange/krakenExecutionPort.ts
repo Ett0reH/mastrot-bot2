@@ -23,6 +23,7 @@ import type { ExecutionPort, ExecutionReport, FundingCharge, FundingPosition } f
 import { type AlertCode, type AlertLevel, type AlertSink, makeAlert } from '../ops/alerts';
 import { floorToStep, type InstrumentRegistry, roundToTick } from './instruments';
 import type { KrakenAdapter } from './krakenAdapter';
+import { slotEnd } from '../core/aggregator';
 import { ensureIsolatedLeverage } from './leverage';
 import type { OrderManager } from './orderManager';
 import { averagePrice, isOwnCliOrdId, makeCliOrdId, type OrderFill, type OrderRecord, TERMINAL_STATES } from './orders';
@@ -42,6 +43,8 @@ export interface KrakenPortConfig {
   stopTimeoutMs: number;
   /** Stop protettivo delle posizioni sconosciute: distanza dal prezzo d'ingresso (%). */
   unknownPositionStopPct: number;
+  /** Un ingresso rimandato (uscita sullo stesso simbolo non ancora confermata) scade dopo questo tempo dalla fine del suo slot. */
+  entryMaxDelayMs: number;
 }
 
 /** Finestra di elaborazione degli ordini che riducono il rischio: l'esito serve in fretta. */
@@ -52,6 +55,7 @@ export const DEFAULT_KRAKEN_PORT_CONFIG: KrakenPortConfig = {
   feeRateEstimate: 0.0005,
   stopTimeoutMs: 60_000,
   unknownPositionStopPct: 5,
+  entryMaxDelayMs: 10 * 60_000,
 };
 
 export interface BookPosition {
@@ -84,13 +88,18 @@ export interface UnknownPosition {
 export interface KrakenPortState {
   positions: Record<string, BookPosition>;
   pendingEntries: Record<string, { intent: OpenIntent; cliOrdId: string }>;
+  /**
+   * Ingressi rimandati (D48): su Kraken le posizioni sono nette per simbolo, quindi un ingresso non
+   * parte finché sullo stesso simbolo c'è una posizione del bot (in chiusura) o un ingresso incerto.
+   */
+  deferredEntries: Record<string, { intent: OpenIntent; since: number }>;
   unknownPositions: Record<string, UnknownPosition>;
   alertedForeignOrders: string[];
   queue: ExecutionReport;
 }
 
 export function initialKrakenPortState(): KrakenPortState {
-  return { positions: {}, pendingEntries: {}, unknownPositions: {}, alertedForeignOrders: [], queue: { fills: [], rejected: [] } };
+  return { positions: {}, pendingEntries: {}, deferredEntries: {}, unknownPositions: {}, alertedForeignOrders: [], queue: { fills: [], rejected: [] } };
 }
 
 export interface KrakenPortDeps {
@@ -117,6 +126,12 @@ export class KrakenExecutionPort implements ExecutionPort {
     readonly state: KrakenPortState = initialKrakenPortState(),
   ) {
     if (deps.mode === 'shadow') throw new Error('KrakenExecutionPort non può essere usata in shadow: nessun ordine in shadow');
+    this.state.deferredEntries ??= {}; // stati salvati prima della F7
+  }
+
+  /** Sul simbolo c'è già una posizione del bot (anche in chiusura) o un ingresso con esito incerto. */
+  private symbolBusy(native: string): boolean {
+    return Object.values(this.state.positions).some((p) => p.native === native) || Object.values(this.state.pendingEntries).some((e) => nativeSymbol(e.intent.symbol) === native);
   }
 
   snapshot(): KrakenPortState {
@@ -183,6 +198,13 @@ export class KrakenExecutionPort implements ExecutionPort {
       spec = await this.deps.instruments.get(native);
     } catch (err) {
       return reject((err as Error).message);
+    }
+    // Uscita e nuovo ingresso sullo stesso simbolo nello stesso ciclo, con l'uscita non ancora
+    // confermata: l'ingresso aspetta la conferma (su Kraken le due posizioni si sommerebbero).
+    if (this.symbolBusy(native)) {
+      this.state.deferredEntries[intent.positionId] = { intent, since: this.now() };
+      await this.alert('info', 'EXECUTION_ERROR', `Ingresso ${intent.symbol} rimandato: chiusura precedente sullo stesso simbolo non ancora confermata`, { positionId: intent.positionId });
+      return;
     }
     const size = floorToStep(intent.size, spec);
     if (size <= 0) return reject(`size ${intent.size} sotto il passo minimo del contratto (${spec.sizeStep})`);
@@ -306,9 +328,19 @@ export class KrakenExecutionPort implements ExecutionPort {
     const previous = records.filter((r) => r.purpose === 'EXIT' || r.purpose === 'EMERGENCY_CLOSE');
     if (previous.some((r) => !TERMINAL_STATES.has(r.state))) return; // una chiusura è già in volo
     const reason = pos.closing?.reason ?? 'EXTERNAL_CLOSE';
+    // Già chiusa per intero dagli ordini precedenti (es. esito arrivato con la riconciliazione):
+    // nessun nuovo ordine (D48).
+    const done = previous.flatMap((r) => r.fills);
+    const closedSoFar = done.reduce((a, f) => a + f.size, 0);
+    if (closedSoFar >= pos.entrySize - 1e-12) {
+      await this.finalizeClose(pos, done, reason, report);
+      return;
+    }
+    // Il resto si calcola dagli ordini del bot, non dalla size netta del simbolo su Kraken.
+    const remaining = Math.min(pos.size, Number((pos.entrySize - closedSoFar).toFixed(10)));
     const purpose = reason === 'PROTECTION_FAILURE' ? 'EMERGENCY_CLOSE' : 'EXIT';
     const record = await this.deps.orders.submit(
-      { intentKey: pos.positionId, purpose, symbol: pos.native, side: pos.direction === 'LONG' ? 'sell' : 'buy', orderType: 'mkt', size: pos.size, reduceOnly: true },
+      { intentKey: pos.positionId, purpose, symbol: pos.native, side: pos.direction === 'LONG' ? 'sell' : 'buy', orderType: 'mkt', size: remaining, reduceOnly: true },
       previous.filter((r) => r.purpose === purpose).length + 1,
       'protective',
       PROTECTIVE_PROCESS_WINDOW_MS,
@@ -383,7 +415,24 @@ export class KrakenExecutionPort implements ExecutionPort {
       delete this.state.unknownPositions[native];
       await this.deps.stops.remove(unknown.protectionId);
     }
+    await this.sendDeferredEntries(queue);
     await this.cleanOrders(openOrders);
+  }
+
+  /** Ingressi rimandati: partono appena il simbolo è libero, se sono ancora in tempo (D48). */
+  private async sendDeferredEntries(queue: ExecutionReport): Promise<void> {
+    for (const [positionId, deferred] of Object.entries(this.state.deferredEntries)) {
+      const late = this.now() - slotEnd(deferred.intent.slotTime) > this.config.entryMaxDelayMs;
+      const busy = this.symbolBusy(nativeSymbol(deferred.intent.symbol));
+      if (busy && !late) continue;
+      delete this.state.deferredEntries[positionId];
+      if (late) {
+        queue.rejected.push({ positionId, reason: 'ingresso scaduto: la chiusura precedente sullo stesso simbolo non si è conclusa in tempo' });
+        await this.alert('warning', 'EXECUTION_ERROR', `Ingresso ${deferred.intent.symbol} annullato: chiusura precedente non confermata entro ${Math.round(this.config.entryMaxDelayMs / 60_000)} minuti`, { positionId });
+        continue;
+      }
+      await this.open(deferred.intent, queue);
+    }
   }
 
   /**
@@ -441,6 +490,7 @@ export class KrakenExecutionPort implements ExecutionPort {
       for (const pos of book) await this.closedOnExchange(pos, fills, this.state.queue, 'KILL_SWITCH');
     }
     this.state.pendingEntries = {};
+    this.state.deferredEntries = {};
     this.state.unknownPositions = {};
     // 4. Stop residui.
     const cancel = await this.deps.adapter.cancelAllOrders(undefined, 'protective');

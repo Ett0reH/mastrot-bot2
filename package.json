@@ -18,6 +18,7 @@
     "kraken:demo-kill": "tsx scripts/kraken/demoKillSwitch.ts",
     "risk:audit": "tsx scripts/risk/guardAudit.ts",
     "dashboard:replay": "tsx scripts/dashboard/replayServer.ts",
+    "shadow:report": "tsx scripts/shadow/report.ts",
     "golden:check": "tsx scripts/golden/legacyGolden.ts check && tsx scripts/golden/engineGolden.ts check",
     "golden:update": "tsx scripts/golden/legacyGolden.ts update",
     "golden:engine:update": "tsx scripts/golden/engineGolden.ts update",

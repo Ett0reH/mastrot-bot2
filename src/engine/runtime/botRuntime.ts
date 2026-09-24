@@ -13,6 +13,8 @@
 //   4. ricostruisce le posizioni con tutti i campi (dallo stato del core, D22) e riallinea gli
 //      intenti rimasti in sospeso con l'archivio degli ordini; 5. verifica gli stop; 6. riprende.
 // In demo e live senza persistenza il bot non opera (SAFE_MODE); in shadow può partire senza.
+// Lo stato salvato da un bot di un'altra modalità (stesso database) non si usa mai e il suo lease
+// non si prende; uno stato non ricostruibile ferma il bot con un alert (SAFE_MODE, D51, D53).
 import type { EngineConfig, TradingMode } from '../config/config';
 import type { CoreConfig } from '../core/decisionCore';
 import { slotEnd } from '../core/aggregator';
@@ -39,7 +41,7 @@ import type { BotStore, EquityPoint, RuntimeSnapshot } from '../persistence/botS
 import { SimExecutionPort } from '../replay/replay';
 import type { RestingStop } from '../sim/simExchange';
 import { checkEntry, evaluateEquity, type EquityWatch, type OperationalState } from '../risk/riskGuard';
-import type { Fill, OpenIntent } from '../core/types';
+import type { Fill, Intent, OpenIntent } from '../core/types';
 import { GatedExecutionPort } from './gatedPort';
 import type { HeartbeatStatus } from './heartbeat';
 import type { LeaseManager } from './lease';
@@ -78,6 +80,8 @@ export interface RuntimeOptions {
   cycle?: Partial<Omit<DecisionCycleConfig, 'core' | 'startMs'>>;
   /** Dati più vecchi di così: alert STALE_DATA. */
   staleDataMs?: number;
+  /** Protezione (o recovery) fallita di continuo per così tanto: alert critico e health non sano (D54). */
+  protectionFailingMs?: number;
   /** Salvataggi falliti consecutivi dopo i quali gli ingressi si bloccano. */
   maxFailedSaves?: number;
   journalRetentionDays?: number;
@@ -163,8 +167,13 @@ export class BotRuntime {
   lastError: string | null = null;
   private cycle: DecisionCycle | null = null;
   private port: KrakenExecutionPort | SimExecutionPort | null = null;
+  private gate: GatedExecutionPort | null = null;
   private snapshot: Snapshot | null = null;
   private snapshotLoaded = false;
+  /** Motivo per cui lo stato salvato non si può usare: il bot resta fermo fino al riavvio (D51, D53). */
+  private stateRefusal: string | null = null;
+  /** Inizio della serie di cicli di protezione (o recovery) falliti, con l'ultimo errore (D54). */
+  private protectionFailure: { since: number; error: string; alerted: boolean } | null = null;
   private startMs: number | null = null;
   private failedSaves = 0;
   private persistenceHealthy = true;
@@ -183,6 +192,7 @@ export class BotRuntime {
   /** Tutti i trade chiusi dello stato attuale (dal più recente): base delle metriche. */
   readonly allTrades: TradeRecord[] = [];
   private readonly reportTasks = new Set<Promise<void>>();
+  private readonly savedTrades = new Set<string>();
   private readonly reporting = new Set<string>();
   latestReport: DailyReport | null = null;
   private lock: Promise<unknown> = Promise.resolve();
@@ -266,6 +276,36 @@ export class BotRuntime {
     return this.deps.lease.canWrite();
   }
 
+  /** Protezione ferma da oltre la soglia (null = funziona o il guasto è appena iniziato). */
+  private protectionStalled(now: number): string | null {
+    const failure = this.protectionFailure;
+    if (failure === null || now - failure.since < (this.options.protectionFailingMs ?? 90_000)) return null;
+    return `protezione ferma da ${Math.round((now - failure.since) / 1000)} s (${failure.error})`;
+  }
+
+  /**
+   * Esito di un ciclo di protezione o di un tentativo di recovery con Kraken (error null = riuscito).
+   * Oltre la soglia: un alert critico e health non sano; al ritorno, un alert di ripristino (D54).
+   * Gli ingressi sono già fermi: il ciclo decisionale riconcilia con Kraken prima di ogni slot
+   * (settle), quindi senza Kraken non decide nulla; al ritorno gli ingressi ormai tardivi non partono.
+   */
+  private async trackProtection(now: number, error: string | null): Promise<void> {
+    const failure = this.protectionFailure;
+    if (error === null) {
+      this.protectionFailure = null;
+      if (failure?.alerted) await this.alert('info', 'PROTECTION_FAILING', `Protezione di nuovo attiva dopo ${Math.max(1, Math.round((now - failure.since) / 60_000))} min`);
+      return;
+    }
+    const current = failure ? { ...failure, error } : { since: now, error, alerted: false };
+    this.protectionFailure = current;
+    const stalled = this.protectionStalled(now);
+    if (stalled !== null && !current.alerted) {
+      current.alerted = true;
+      const stops = this.mode === 'shadow' ? '' : '; gli stop nativi già su Kraken restano attivi';
+      await this.alert('critical', 'PROTECTION_FAILING', `${stalled.charAt(0).toUpperCase()}${stalled.slice(1)}: nessuna nuova decisione finché non riprende${stops}`);
+    }
+  }
+
   // --- Recovery -------------------------------------------------------------------------------
 
   /** Porta il runtime in RUNNING eseguendo i passi di recovery mancanti. Idempotente. */
@@ -275,6 +315,8 @@ export class BotRuntime {
 
   private async recover(): Promise<RuntimeStatus> {
     if (this.status === 'RUNNING' || this.status === 'STOPPED') return this.status;
+    // Stato salvato non utilizzabile: serve una persona (configurazione o database), poi un riavvio.
+    if (this.stateRefusal !== null) return this.status;
     const now = this.deps.now();
     // 1. Stato persistito
     if (!this.snapshotLoaded) {
@@ -293,6 +335,8 @@ export class BotRuntime {
         await this.alert('warning', 'EXECUTION_ERROR', `Shadow senza persistenza: si parte da uno stato nuovo (${this.lastError})`);
       }
     }
+    // Lo stato di un bot di un'altra modalità non si usa, e il suo lease non si prende.
+    if (await this.refuseForeignState(this.snapshot)) return this.status;
     // 2. Lease
     let acquired = false;
     try {
@@ -313,15 +357,31 @@ export class BotRuntime {
         this.lastError = `stato non caricato: ${(err as Error).message}`;
         if (this.mode !== 'shadow') return this.status;
       }
-      this.build(now);
+      if (await this.refuseForeignState(this.snapshot)) return this.status;
+      try {
+        this.build(now);
+      } catch (err) {
+        // Errore deterministico (lo stato non cambia da solo): non si riprova a ogni ciclo.
+        await this.refuseState(`stato salvato non utilizzabile: ${(err as Error).message}`);
+        return this.status;
+      }
     }
     const cycle = this.cycle as DecisionCycle;
     try {
       if (this.port instanceof KrakenExecutionPort) {
         // 3-5. Intenti in sospeso, riconciliazione con Kraken e verifica degli stop. Con un kill
         // switch in corso la riconciliazione la fa il kill switch stesso (chiusure KILL_SWITCH).
-        await this.adoptPendingIntents(this.port, cycle);
-        if (this.risk.opState !== 'HALTING') await this.port.protect();
+        const unsent = await this.adoptPendingIntents(this.port, cycle);
+        if (this.risk.opState !== 'HALTING') {
+          await this.port.protect();
+          if (unsent.length > 0) {
+            // Prima gli esiti trovati dalla riconciliazione (chiusure, ingressi eseguiti), così il
+            // core rispecchia Kraken quando gli intenti rimasti partono.
+            const drained = cycle.applyExternal(this.port.drain());
+            await this.afterTick({ processedSlots: 0, waiting: false, lastSlot: cycle.state.lastSlot, intents: [], journal: [], trades: drained.trades, events: [], equity: [], fills: drained.fills });
+            await this.resendUnsent(unsent, cycle);
+          }
+        }
       }
       // 6. Storico delle candele e ripresa.
       await cycle.start();
@@ -331,15 +391,39 @@ export class BotRuntime {
       // Il ciclo va ricostruito al prossimo tentativo (start() non è ripetibile).
       this.cycle = null;
       this.port = null;
+      await this.trackProtection(now, this.lastError);
       return this.status;
     }
     this.status = 'RUNNING';
     this.lastError = null;
+    await this.trackProtection(now, null);
     await this.loadHistory();
     await this.ensureDayCheckpoint();
     await this.persist();
     this.log('info', `Runtime in esecuzione (${this.mode}, lease epoch ${this.deps.lease.lease?.epoch})`);
     return this.status;
+  }
+
+  /** Stato salvato da un bot di un'altra modalità sullo stesso database (D51). */
+  private async refuseForeignState(snap: Snapshot | null): Promise<boolean> {
+    if (!snap || snap.mode === this.mode) return false;
+    await this.refuseState(
+      `lo stato salvato è di un bot in modalità ${snap.mode}, questa istanza è in ${this.mode}: il database è di un altro bot. ` +
+        'Serve un database Firestore per ogni modalità (FIRESTORE_DATABASE_ID)',
+    );
+    return true;
+  }
+
+  /** Il bot non opera con questo stato: SAFE_MODE senza lease, un alert critico, nessuna scrittura. */
+  private async refuseState(reason: string): Promise<void> {
+    this.stateRefusal = reason;
+    this.lastError = reason;
+    this.status = 'SAFE_MODE';
+    this.cycle = null;
+    this.port = null;
+    this.gate = null;
+    await this.deps.lease.release().catch(() => undefined);
+    await this.alert('critical', 'STATE_REFUSED', `Il bot non opera: ${reason}`);
   }
 
   private build(now: number): void {
@@ -365,34 +449,58 @@ export class BotRuntime {
       const simState = snap && snap.port.kind === 'sim' ? snap.port.state : { stops: [] };
       this.port = new SimExecutionPort(REALISTIC_PROFILE.execution, { kind: 'none' }, simState);
     }
-    const gate = new GatedExecutionPort(this.port, (intent, approved) => this.guardEntry(intent, approved));
-    this.cycle = new DecisionCycle(this.cycleConfig(this.startMs), { source: this.deps.source, port: gate, checkpoint: () => this.checkpoint() }, snap?.core);
+    this.gate = new GatedExecutionPort(this.port, (intent, approved) => this.guardEntry(intent, approved));
+    this.cycle = new DecisionCycle(this.cycleConfig(this.startMs), { source: this.deps.source, port: this.gate, checkpoint: (pending) => this.checkpoint(pending.trades) }, snap?.core);
   }
 
   /**
    * Allinea gli intenti rimasti in sospeso nel core con l'archivio degli ordini: un ordine inviato
-   * prima del crash viene riconciliato; un intento mai inviato viene annullato (sarà ridecisa
-   * alla prossima chiusura oraria, se ancora valida).
+   * prima del crash viene riconciliato. Restituisce gli intenti decisi e mai inviati (il record
+   * dell'ordine si salva prima dell'invio: senza record l'ordine non è mai partito).
    */
-  private async adoptPendingIntents(port: KrakenExecutionPort, cycle: DecisionCycle): Promise<void> {
+  private async adoptPendingIntents(port: KrakenExecutionPort, cycle: DecisionCycle): Promise<Intent[]> {
     const orders = (this.deps.kraken as KrakenRuntimeDeps).orders;
-    for (const intent of Object.values(cycle.state.pendingOpens)) {
-      if (port.state.pendingEntries[intent.positionId] || port.state.positions[intent.positionId]) continue;
-      const cliOrdId = makeCliOrdId(intent.positionId, 'ENTRY', 1);
-      if (await orders.store.get(cliOrdId)) {
-        port.state.pendingEntries[intent.positionId] = { intent, cliOrdId };
-      } else {
-        cycle.rejectPending(intent.positionId);
-        await this.alert('warning', 'EXECUTION_ERROR', `Ingresso ${intent.symbol} deciso prima del riavvio e mai inviato: annullato`, { positionId: intent.positionId });
-      }
-    }
+    const unsent: Intent[] = [];
     for (const pending of Object.values(cycle.state.pendingCloses)) {
       const positionId = pending.intent.positionId;
       const pos = port.state.positions[positionId];
       const exits = (await orders.store.byIntent(positionId)).filter((r) => r.purpose === 'EXIT' || r.purpose === 'EMERGENCY_CLOSE');
       if (pos && exits.length > 0) pos.closing ??= { reason: pending.intent.exitType, since: this.deps.now() };
+      else if (pos) unsent.push(pending.intent);
       else if (exits.length === 0) cycle.rejectPending(positionId);
     }
+    for (const intent of Object.values(cycle.state.pendingOpens)) {
+      if (port.state.pendingEntries[intent.positionId] || port.state.positions[intent.positionId] || port.state.deferredEntries[intent.positionId]) continue;
+      const cliOrdId = makeCliOrdId(intent.positionId, 'ENTRY', 1);
+      if (await orders.store.get(cliOrdId)) port.state.pendingEntries[intent.positionId] = { intent, cliOrdId };
+      else unsent.push(intent);
+    }
+    return unsent;
+  }
+
+  /**
+   * Intenti decisi prima del riavvio e mai inviati (D49): le uscite partono sempre, gli ingressi
+   * solo se sono ancora nella finestra del ciclo (come senza riavvio); gli altri si annullano.
+   */
+  private async resendUnsent(unsent: readonly Intent[], cycle: DecisionCycle): Promise<void> {
+    if (unsent.length === 0) return;
+    const now = this.deps.now();
+    const maxDelay = this.cycleConfig(this.startMs as number).maxEntryDelayMs;
+    const send: Intent[] = [];
+    for (const intent of unsent) {
+      const delay = now - slotEnd(intent.slotTime);
+      if (intent.kind === 'OPEN' && delay > maxDelay) {
+        cycle.rejectPending(intent.positionId);
+        await this.alert('warning', 'EXECUTION_ERROR', `Ingresso ${intent.symbol} deciso prima del riavvio e mai inviato: ${Math.round(delay / 60_000)} minuti dopo la decisione, annullato`, { positionId: intent.positionId });
+      } else {
+        send.push(intent);
+      }
+    }
+    if (send.length === 0) return;
+    this.log('info', `Recovery: invio di ${send.length} intenti decisi prima del riavvio e mai inviati`);
+    const report = await (this.gate as GatedExecutionPort).execute(send);
+    const applied = cycle.applyExternal(report);
+    await this.afterTick({ processedSlots: 0, waiting: false, lastSlot: cycle.state.lastSlot, intents: [], journal: [], trades: applied.trades, events: [], equity: [], fills: applied.fills });
   }
 
   // --- Persistenza ------------------------------------------------------------------------------
@@ -420,9 +528,20 @@ export class BotRuntime {
   }
 
   /** Salvataggio write-ahead prima dell'esecuzione: se fallisce il ciclo non invia ingressi. */
-  private async checkpoint(): Promise<void> {
+  private async checkpoint(trades: readonly TradeRecord[] = []): Promise<void> {
+    // Prima i trade già chiusi nel tick: lo stato che segue li contiene (D50). Un errore qui
+    // blocca gli ingressi del ciclo, come il salvataggio dello stato.
+    for (const trade of trades) await this.persistTrade(trade);
     const data = this.snapshotData();
     if (data) await this.deps.store.saveSnapshot(data);
+  }
+
+  /** Salva un trade chiuso (una volta: il documento è per posizione, un secondo salvataggio non serve). */
+  private async persistTrade(trade: TradeRecord): Promise<void> {
+    const positionId = `${trade.symbol.split('/')[0]}-${trade.entryTime}`;
+    if (this.savedTrades.has(positionId)) return;
+    await this.deps.store.appendTrade(positionId, trade);
+    this.savedTrades.add(positionId);
   }
 
   private async persist(): Promise<void> {
@@ -770,7 +889,7 @@ export class BotRuntime {
       this.recentTrades.unshift(trade);
       this.allTrades.unshift(trade);
       try {
-        await store.appendTrade(positionId, trade);
+        await this.persistTrade(trade);
       } catch (err) {
         this.lastError = `trade non salvato: ${(err as Error).message}`;
       }
@@ -841,22 +960,28 @@ export class BotRuntime {
         // Il kill switch ha la precedenza sulla protezione ordinaria; si ripete finché non è flat.
         try {
           await this.killStep();
+          await this.trackProtection(now, null);
         } catch (err) {
           this.lastError = `kill switch: ${(err as Error).message}`;
           this.log('warn', this.lastError);
           await this.persist();
+          await this.trackProtection(now, this.lastError);
         }
         return;
       }
       if (this.port instanceof KrakenExecutionPort) {
+        let protectedOk = false;
         try {
           await this.port.protect();
+          protectedOk = true;
           await this.updateSizingCap();
           await this.syncLedger(now);
         } catch (err) {
           this.lastError = `ciclo di protezione: ${(err as Error).message}`;
           this.log('warn', this.lastError);
         }
+        // Conta solo la protezione (riconciliazione e stop): sizing e ledger si ripetono da soli.
+        await this.trackProtection(now, protectedOk ? null : this.lastError);
       }
       await this.checkStaleData(now);
       await this.persist();
@@ -922,6 +1047,8 @@ export class BotRuntime {
     this.status = 'STANDBY';
     this.cycle = null;
     this.port = null;
+    // La protezione passa all'istanza con il lease: un guasto in corso non è più di questa istanza.
+    this.protectionFailure = null;
     await this.alert('critical', 'LEASE_LOST', 'Lease d istanza perso: questa istanza smette subito di inviare ordini');
   }
 
@@ -947,6 +1074,10 @@ export class BotRuntime {
   reset(): Promise<void> {
     return this.inCycle('C', async () => {
       if (this.mode !== 'shadow') throw new Error('Reset non consentito in demo e live');
+      // Solo l'istanza che opera (con il lease) cancella stato e storico: sullo stesso database
+      // può esserci il bot di un'altra modalità o un altro shadow (D52).
+      const blocked = this.stateRefusal ?? this.deps.lease.canWrite();
+      if (blocked !== null) throw new Error(`Reset rifiutato: ${blocked}`);
       // Lo stato salvato va eliminato: il recovery lo rileggerebbe dopo aver preso il lease.
       await this.deps.store.deleteSnapshot();
       await this.deps.store.clearHistory();
@@ -957,6 +1088,7 @@ export class BotRuntime {
       this.firstStartedAt = null;
       this.ledgerTotals = { fees: 0, funding: 0 };
       this.allTrades.length = 0;
+      this.savedTrades.clear();
       this.latestReport = null;
       this.startMs = null;
       this.cycle = null;
@@ -1016,6 +1148,8 @@ export class BotRuntime {
     for (const p of positions.filter((x) => x.protection === 'UNPROTECTED' || x.protection === 'PENDING')) issues.push(`posizione ${p.id} ${p.protection === 'PENDING' ? 'in attesa di conferma' : 'senza stop nativo'}`);
     if (unknown.length > 0) issues.push(`${unknown.length} posizioni sconosciute sul conto`);
     if (!this.persistenceHealthy) issues.push('persistenza non disponibile');
+    const stalled = this.protectionStalled(now);
+    if (stalled !== null) issues.push(stalled);
     if (heartbeat && !heartbeat.healthy) issues.push(...heartbeat.issues);
     const fromLogs = this.logger.recentProblems(20).map((r) => ({ at: r.at, source: 'log' as const, level: r.level, message: r.message }));
     const fromAlerts = this.recentAlerts.filter((a) => a.level !== 'info').slice(-20).map((a) => ({ at: a.at, source: 'alert' as const, level: a.level, message: a.message, code: a.code }));
