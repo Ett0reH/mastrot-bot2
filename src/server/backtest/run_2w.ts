@@ -23,9 +23,9 @@ import {
   NormalRsi2TrendTrailingStats
 } from "../core/architecture";
 
-// Alpaca API Credentials
-const API_KEY = "PKD4NN6JNJGLBVQPL5YFLJ3RCP";
-const SECRET_KEY = "5HMSSeUm3jLjNoik98vS8JUiWwdBWRxQcGJQkYtzL3Ba";
+// Alpaca API Credentials: solo da variabili d'ambiente (le chiavi prima hardcoded vanno ruotate).
+const API_KEY = process.env.ALPACA_API_KEY ?? "";
+const SECRET_KEY = process.env.ALPACA_SECRET_KEY ?? "";
 const BASE_URL = "https://data.alpaca.markets/v1beta3/crypto/us/bars";
 const SYMBOLS = [
   "BTC/USD",
@@ -117,6 +117,9 @@ async function fetch15mData(
     }
   }
 
+  if (!API_KEY || !SECRET_KEY) {
+    throw new Error("ALPACA_API_KEY e ALPACA_SECRET_KEY sono necessarie per scaricare i dati Alpaca");
+  }
   let pageToken: string | null = null;
   console.log(
     `Downloading ${symbol} [15Min] from ${currentStart} to ${end}...`,

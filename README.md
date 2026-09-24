@@ -1,20 +1,32 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# MastroT / ARBITER — bot di trading su Kraken Futures
 
-# Run and deploy your AI Studio app
+Bot di trading crypto su perpetual lineari di Kraken Futures (`PF_*`), con backtest event-driven, motore live e dashboard React.
 
-This contains everything you need to run your app locally.
+- Architettura e regole di coerenza: [`mastrot_memo.md`](mastrot_memo.md)
+- Piano di lavoro verso il live test: [`PROMPT_LIVE_READY_KRAKEN.md`](PROMPT_LIVE_READY_KRAKEN.md) e report di fase in [`docs/phase_reports/`](docs/phase_reports/)
 
-View your app in AI Studio: https://ai.studio/apps/26461dfc-0237-4acc-a164-421b3d72d443
+## Avvio locale
 
-## Run Locally
+Prerequisiti: Node.js 20 o superiore.
 
-**Prerequisites:**  Node.js
+```bash
+npm install
+cp .env.example .env    # imposta almeno ADMIN_TOKEN (es. openssl rand -hex 32)
+npm run dev             # http://localhost:3000
+```
 
+Senza configurazione il bot parte in modalità **shadow**: usa dati di mercato reali, simula i fill e non invia ordini. Le modalità `demo` e `live` e i relativi requisiti sono descritti in `.env.example`. Il server non parte se la configurazione non è valida.
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+La dashboard chiede l'`ADMIN_TOKEN` al primo accesso e lo salva nel browser.
+
+## Comandi
+
+| Comando | Cosa fa |
+|---|---|
+| `npm test` | Test automatici (node:test), inclusi dataset e golden backtest |
+| `npm run typecheck` | Typecheck del codice legacy e di quello strict (`src/engine`, `tests`, `scripts`) |
+| `npm run backtest` | Backtest legacy sulle finestre del golden |
+| `npm run golden:check` | Confronta il backtest con il golden versionato |
+| `npm run data:verify` | Verifica checksum e integrità del dataset |
+| `npm run data:download` | Ricostruisce il dataset completo da Kraken (serve rete verso futures.kraken.com) |
+| `npm run build` / `npm start` | Build di produzione e avvio |

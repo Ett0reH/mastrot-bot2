@@ -8,6 +8,7 @@ import { Activity, Hexagon, Download, FileText, TrendingUp, Shield, Sliders, Git
 import { AreaChart, Area, ResponsiveContainer, Tooltip, YAxis, XAxis, ReferenceLine } from 'recharts';
 import { runQuantPipeline, RegimePolicy, RegimeType } from './lib/quantEngine';
 import { calculateMetrics } from './lib/metricsCalculator';
+import { apiFetch, AuthRequiredError, type AuthProblem, getAdminToken, setAdminToken } from './lib/api';
 
 interface SystemState {
   session: string;
@@ -85,6 +86,38 @@ export default function Dashboard() {
   const [liveState, setLiveState] = useState<any>(null);
   const [equityTimeframe, setEquityTimeframe] = useState<'1H'|'4H'|'1D'>('1H');
   const [resetConfirm, setResetConfirm] = useState(false);
+  // Autenticazione delle API di controllo (F1): null = nessun problema noto.
+  const [authProblem, setAuthProblem] = useState<{ code: AuthProblem; message: string } | null>(null);
+  const [tokenInput, setTokenInput] = useState('');
+  const [hasToken, setHasToken] = useState<boolean>(() => !!getAdminToken());
+  const authBlocked = useRef(false);
+
+  const reportAuthError = (err: unknown): boolean => {
+    if (err instanceof AuthRequiredError) {
+      authBlocked.current = true;
+      setAuthProblem({ code: err.code, message: err.message });
+      return true;
+    }
+    return false;
+  };
+
+  const saveToken = () => {
+    const token = tokenInput.trim();
+    if (!token) return;
+    setAdminToken(token);
+    setHasToken(true);
+    setTokenInput('');
+    authBlocked.current = false;
+    setAuthProblem(null);
+  };
+
+  const logout = () => {
+    setAdminToken(null);
+    setHasToken(false);
+    setLiveState(null);
+    authBlocked.current = true;
+    setAuthProblem({ code: 'UNAUTHORIZED', message: 'Token rimosso: inseriscilo per controllare il bot.' });
+  };
   
   const handleTrain = async () => {
     setIsTraining(true);
@@ -135,13 +168,16 @@ export default function Dashboard() {
     const interval = setInterval(fetchState, 1500);
 
     const fetchLiveState = async () => {
+      if (authBlocked.current) return; // in attesa del token: niente richieste inutili
       try {
-        const res = await fetch('/api/paper-trading/status');
+        const res = await apiFetch('/api/paper-trading/status');
         if (res.ok) {
           const data = await res.json();
           if (isMounted) setLiveState(data);
         }
-      } catch (err) {}
+      } catch (err) {
+        if (isMounted) reportAuthError(err);
+      }
     };
     fetchLiveState();
     const liveInterval = setInterval(fetchLiveState, 2000);
@@ -267,7 +303,7 @@ export default function Dashboard() {
 
   const handleStartLive = async () => {
     try {
-      const res = await fetch('/api/paper-trading/start', { method: 'POST' });
+      const res = await apiFetch('/api/paper-trading/start', { method: 'POST' });
       
       const contentType = res.headers.get("content-type");
       if (!contentType || !contentType.includes("application/json")) {
@@ -278,13 +314,13 @@ export default function Dashboard() {
       if (res.ok) setLiveState(data);
       else alert(`Error: ${data.error}`);
     } catch (err: any) {
-      alert(`Errore di avvio: ${err.message}`);
+      if (!reportAuthError(err)) alert(`Errore di avvio: ${err.message}`);
     }
   };
 
   const handleStopLive = async () => {
     try {
-      const res = await fetch('/api/paper-trading/stop', { method: 'POST' });
+      const res = await apiFetch('/api/paper-trading/stop', { method: 'POST' });
       const contentType = res.headers.get("content-type");
       if (!contentType || !contentType.includes("application/json")) {
          throw new Error("Il server si sta riavviando o non è al momento disponibile. Riprova tra poco.");
@@ -292,7 +328,7 @@ export default function Dashboard() {
       const data = await res.json();
       setLiveState(data);
     } catch (err: any) {
-      alert(`Errore di stop: ${err.message}`);
+      if (!reportAuthError(err)) alert(`Errore di stop: ${err.message}`);
     }
   };
 
@@ -305,7 +341,7 @@ export default function Dashboard() {
     setResetConfirm(false);
     
     try {
-      const res = await fetch('/api/paper-trading/reset', { method: 'POST' });
+      const res = await apiFetch('/api/paper-trading/reset', { method: 'POST' });
       const contentType = res.headers.get("content-type");
       if (!contentType || !contentType.includes("application/json")) {
          throw new Error("Il server si sta riavviando o non è al momento disponibile. Riprova tra poco.");
@@ -317,7 +353,7 @@ export default function Dashboard() {
         alert(`Reset failed: ${data.error}`);
       }
     } catch (err: any) {
-      alert(`Reset failed: ${err.message}`);
+      if (!reportAuthError(err)) alert(`Reset failed: ${err.message}`);
     }
   };
 
@@ -363,14 +399,58 @@ export default function Dashboard() {
               ${(liveState?.balance || 10000).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
             </div>
             <div className="border border-[#3B82F6]/30 bg-[#3B82F6]/5 text-[#3B82F6] px-3 py-1.5 text-[10px] items-center flex rounded font-mono tracking-widest font-bold">
-              LIVE STATUS
+              {((state as any)?.tradingMode || 'shadow').toUpperCase()} MODE
             </div>
+            {hasToken && (
+              <button onClick={logout} className="text-[10px] font-mono tracking-widest text-white/40 hover:text-white/80 uppercase">
+                Esci
+              </button>
+            )}
             <div className="hidden sm:flex items-center gap-3 text-white/40 ml-2">
               <Activity className="w-4 h-4 cursor-pointer hover:text-white/80" />
               <Hexagon className="w-4 h-4 cursor-pointer hover:text-white/80" />
             </div>
           </div>
         </header>
+
+        {/* Accesso alle API di controllo (F1) */}
+        {authProblem && (
+          <div className="bg-[#FFB020]/10 border-b border-[#FFB020]/30 p-4 md:px-8 flex-shrink-0">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 max-w-[1400px] mx-auto">
+              <div>
+                <h3 className="text-[#FFB020] font-bold uppercase tracking-widest text-[12px] mb-0.5">
+                  {authProblem.code === 'ADMIN_DISABLED' ? 'Controllo del bot disabilitato' : 'Accesso richiesto'}
+                </h3>
+                <p className="text-[#FFB020]/80 text-[11px] font-mono">
+                  {authProblem.code === 'ADMIN_DISABLED'
+                    ? 'Il server non ha ADMIN_TOKEN configurato: imposta la variabile e riavvia il server.'
+                    : authProblem.message}
+                </p>
+              </div>
+              {authProblem.code === 'UNAUTHORIZED' && (
+                <form
+                  className="flex gap-2"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    saveToken();
+                  }}
+                >
+                  <input
+                    type="password"
+                    autoComplete="current-password"
+                    placeholder="ADMIN_TOKEN"
+                    value={tokenInput}
+                    onChange={(e) => setTokenInput(e.target.value)}
+                    className="bg-[#1A1C22] border border-white/10 rounded px-3 py-2 text-[12px] font-mono text-white/90 w-64"
+                  />
+                  <button type="submit" className="bg-[#FFB020] text-black px-4 py-2 rounded font-bold text-[10px] tracking-widest uppercase">
+                    Accedi
+                  </button>
+                </form>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Emergency Halt Warning banner */}
         {liveState?.status === 'ERROR_RECOVERING' && (

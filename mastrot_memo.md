@@ -37,3 +37,8 @@ Le logiche di uscita sono complesse e stratificate per preservare l'equità:
 - **Test:** `npm test` (node:test via tsx, 85 test), `npm run typecheck` (legacy + strict per `src/engine`, `tests`, `scripts`).
 - **Codice nuovo:** va in `src/engine/` in TypeScript strict. `src/server/liveEngineUtils.ts` contiene le utility pure del live engine legacy.
 - **Materiale storico** spostato in `archive/`.
+
+### F1 — Sicurezza e configurazione (completata)
+- **Modalità:** `TRADING_MODE` = shadow (default, nessun ordine) | demo (Kraken demo-futures) | live (richiede conferma esplicita, tutti i limiti, alert e `ADMIN_TOKEN`). La configurazione è validata all'avvio in `src/engine/config/config.ts`: se non è valida il server non parte. Nessun altro punto del codice decide ambiente o chiavi Kraken.
+- **API:** le API di controllo richiedono `ADMIN_TOKEN`; `/api/cron/tick` richiede `CRON_TOKEN`. La dashboard usa `src/lib/api.ts`.
+- **Firestore:** solo lato server (Admin SDK); le regole negano ogni accesso ai client. Nessun segreto nel codice: `tests/security/secrets.test.ts` lo verifica.

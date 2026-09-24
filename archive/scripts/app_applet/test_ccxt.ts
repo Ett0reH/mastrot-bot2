@@ -1,6 +1,6 @@
 import ccxt from 'ccxt';
 async function test() {
-  const ex = new ccxt.alpaca({ apiKey: 'PKD4NN6JNJGLBVQPL5YFLJ3RCP', secret: '5HMSSeUm3jLjNoik98vS8JUiWwdBWRxQcGJQkYtzL3Ba' });
+  const ex = new ccxt.alpaca({ apiKey: process.env.ALPACA_API_KEY, secret: process.env.ALPACA_SECRET_KEY /* chiavi rimosse: erano hardcoded, vanno ruotate */ });
   try {
      const data = await ex.fetchOHLCV('BTC/USD', '1h', undefined, 55);
      console.log("LENGTH 1H:", data.length);

@@ -1,10 +1,10 @@
 import ccxt from 'ccxt';
 import "dotenv/config";
 
-process.env.LIVE_TRADING_ENABLED = 'true';
-
-import { initializeApp } from 'firebase/app';
-import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore/lite';
+// Firestore solo lato server con Admin SDK: le regole negano ogni accesso ai client (F1, D05).
+import { applicationDefault, cert, initializeApp } from 'firebase-admin/app';
+import { getFirestore } from 'firebase-admin/firestore';
+import { getRuntimeConfig, krakenClientOptions, ordersEnabled } from '../engine/config/runtime';
 import * as fs from 'fs';
 import * as path from 'path';
 import { calculateSnapshot } from '../lib/metricsCalculator';
@@ -28,9 +28,15 @@ try {
   const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
   if (fs.existsSync(configPath)) {
     const firebaseConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    const app = initializeApp(firebaseConfig);
-    db = getFirestore(app, firebaseConfig.firestoreDatabaseId); 
-    console.log("Firebase initialized successfully");
+    // Credenziali: FIREBASE_SERVICE_ACCOUNT_JSON (JSON del service account) oppure le
+    // Application Default Credentials dell'ambiente (es. il service account di Cloud Run).
+    const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+    const app = initializeApp({
+      credential: serviceAccount ? cert(JSON.parse(serviceAccount)) : applicationDefault(),
+      projectId: firebaseConfig.projectId,
+    }, 'arbiter-live-engine');
+    db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    console.log(`Firebase Admin initialized (project ${firebaseConfig.projectId})`);
   } else {
     console.warn("WARNING: firebase-applet-config.json not found. Firebase will not be connected.");
   }
@@ -39,7 +45,6 @@ try {
 }
 
 const STATE_DOC_ID = 'live';
-const BOT_SECRET = 'arbiter-secret-key-1092';
 
 // Basic state
 export interface LiveState {
@@ -54,7 +59,6 @@ export interface LiveState {
   regimes?: Record<string, string>;
   lastUpdate: string;
   lastError?: string;
-  botSecret?: string;
   equityHistory?: { time: string, equity: number }[];
   metricsHistory?: any[];
   maxHistoricalEquity?: number;
@@ -93,7 +97,6 @@ export let state: LiveState = {
   regime: 'UNKNOWN',
   regimes: {},
   lastUpdate: new Date().toISOString(),
-  botSecret: BOT_SECRET,
   equityHistory: [],
   maxHistoricalEquity: 10000.00,
   orderIntents: {},
@@ -381,7 +384,7 @@ export async function attachNativeProtections(p: ActiveTrade, filledAmount: numb
 }
 
 async function reconcilePendingIntents() {
-    if (!state.orderIntents || !exchange) return;
+    if (!state.orderIntents || !exchange || !ordersEnabled()) return;
 
     for (const [clientOrderId, intent] of Object.entries(state.orderIntents)) {
         if (intent.status === IntentStatus.SUBMITTED || intent.status === IntentStatus.UNKNOWN_TIMEOUT) {
@@ -422,10 +425,11 @@ async function loadInitialState(): Promise<void> {
     return;
   }
   try {
-    const snapshot = await withTimeout(getDoc(doc(db, 'bot_state', STATE_DOC_ID)), 8000, 'Firebase getDoc') as any;
-    if (snapshot.exists()) {
+    const snapshot = await withTimeout(db.collection('bot_state').doc(STATE_DOC_ID).get(), 8000, 'Firebase getDoc') as any;
+    if (snapshot.exists) {
       const saved = snapshot.data();
-      state = { ...state, ...saved, botSecret: BOT_SECRET };
+      delete saved.botSecret; // campo dei documenti precedenti alla F1, non più usato
+      state = { ...state, ...saved };
       simulatedPositions = state.openPositions || [];
       console.log(`[STATE_RESTORED_FROM_FIREBASE] Extracted full snapshot from DB`);
       if (simulatedPositions.length > 0) {
@@ -442,7 +446,12 @@ async function loadInitialState(): Promise<void> {
     }
   } catch (e: any) {
     console.error("Failed to load initial state from Firestore:", e.message);
-    if (e.message?.includes('client is offline') || e.message?.includes('timed out')) {
+    if (e.message?.includes('credential') || e.message?.includes('PERMISSION_DENIED') || e.message?.includes('Missing or insufficient permissions')) {
+       console.error("[Persistence] Firestore non accessibile (credenziali o permessi del service account). Stato solo in memoria:", e.message);
+       db = null;
+       initialStateLoaded = true;
+       return;
+    } else if (e.message?.includes('client is offline') || e.message?.includes('timed out')) {
        console.warn("[Memory Fallback] Firestore client unavailable due to serverless sleep state. Using in-memory bot state.");
        initialStateLoaded = true;
        return; // Do not throw, keep engine running with RAM state
@@ -486,10 +495,9 @@ export async function saveState() {
   if (!db || quotaExceededContext) return;
   let dataToSave: any = {};
   try {
-    const rawData = { ...state, botSecret: BOT_SECRET };
     // Firestore throws error on 'undefined', JSON stringify drops undefined automatically
-    dataToSave = JSON.parse(JSON.stringify(rawData));
-    await withTimeout(setDoc(doc(db, 'bot_state', STATE_DOC_ID), dataToSave), 8000, 'Firebase setDoc');
+    dataToSave = JSON.parse(JSON.stringify(state));
+    await withTimeout(db.collection('bot_state').doc(STATE_DOC_ID).set(dataToSave), 8000, 'Firebase setDoc');
   } catch (e: any) {
     const errMsg = e.message || String(e);
     if (errMsg.includes('does not exist for project')) {
@@ -505,22 +513,10 @@ export async function saveState() {
       // Suppress spamming on timed out writes
     } else {
       console.error("Failed to save state to Firestore (Permissions or quota)", errMsg);
-      if (errMsg.includes('Missing or insufficient permissions')) {
-        console.error("DUMPING FAILED PAYLOAD:", JSON.stringify(dataToSave).substring(0, 500) + '...');
-        const errInfo = {
-          error: errMsg,
-          operationType: 'write',
-          path: 'bot_state/live',
-          authInfo: {
-            userId: null,
-            email: null,
-            emailVerified: null,
-            isAnonymous: null,
-            tenantId: null,
-            providerInfo: []
-          }
-        };
-        throw new Error(JSON.stringify(errInfo));
+      if (errMsg.includes('Missing or insufficient permissions') || errMsg.includes('PERMISSION_DENIED') || errMsg.includes('credential')) {
+        // Non rilanciare: saveState è chiamato anche a metà dei flussi d'ordine.
+        console.error("[Persistence] Scrittura negata: persistenza disattivata, stato solo in memoria.");
+        quotaExceededContext = true;
       }
     }
   }
@@ -539,23 +535,11 @@ class KrakenExchangeAdapter {
     private lastTradesFetch: number = 0;
     private recentTradesCache: any[] | null = null;
 
-    constructor(config: { apiKey?: string, secret?: string }) {
-       this.client = new DerivativesClient({
-           apiKey: config.apiKey,
-           apiSecret: config.secret,
-           strictParamValidation: true,
-           testnet: process.env.KRAKEN_SANDBOX === 'true'
-       });
+    constructor() {
+       // Ambiente e chiavi dalla configurazione (TRADING_MODE): in shadow nessuna chiave,
+       // solo dati pubblici di produzione; in demo demo-futures; in live produzione.
+       this.client = new DerivativesClient(krakenClientOptions());
        TARGET_SYMBOLS.forEach(s => this.markets[s] = true);
-    }
-
-    setSandboxMode(isSandbox: boolean) {
-        this.client = new DerivativesClient({
-            apiKey: process.env.KRAKEN_API_KEY,
-            apiSecret: process.env.KRAKEN_SECRET_KEY,
-            strictParamValidation: true,
-            testnet: isSandbox
-        });
     }
 
     async loadMarkets() {
@@ -1038,15 +1022,14 @@ export async function initExchange() {
   }
 
   // Initialize Kraken Futures connection for live market data
-  exchange = new KrakenExchangeAdapter({
-    apiKey: process.env.KRAKEN_API_KEY,
-    secret: process.env.KRAKEN_SECRET_KEY
-  });
-  if (process.env.KRAKEN_SANDBOX === 'true') {
-    console.log("TEST ENVIRONMENT: Enabling Kraken Sandbox mode");
-    exchange.setSandboxMode(true);
+  exchange = new KrakenExchangeAdapter();
+  const runtimeConfig = getRuntimeConfig();
+  if (runtimeConfig.mode === 'shadow') {
+    console.log("SHADOW MODE: dati pubblici di produzione, nessun ordine e nessuna chiamata privata a Kraken.");
+  } else if (runtimeConfig.mode === 'demo') {
+    console.log("DEMO MODE: ordini su Kraken demo-futures.");
   } else {
-    console.log("WARNING: KRAKEN_SANDBOX is false. Connecting to REAL LIVE ENVIRONMENT!");
+    console.log("LIVE MODE: ordini REALI su Kraken Futures.");
   }
   try {
       await ccxtWithRetry(() => exchange.loadMarkets());
@@ -1180,7 +1163,7 @@ export async function startPaperTrading() {
     
     // Set initialBalance on first start if not already set
     if (state.initialBalance === undefined || state.initialBalance === 10000) {
-      if (exchange) {
+      if (exchange && ordersEnabled()) {
         try {
           const mb = await exchange.fetchMarginBalance();
           if (mb !== null) {
@@ -1247,7 +1230,7 @@ export async function stopPaperTrading() {
 
   if (state.openPositions && state.openPositions.length > 0) {
     for (const p of state.openPositions) {
-        if (process.env.LIVE_TRADING_ENABLED === 'true' && exchange) {
+        if (ordersEnabled() && exchange) {
              const side = p.direction === 'LONG' ? 'sell' : 'buy';
              try {
                  console.log(`[LIVE EXECUTION] Sending ${side} exit order for ${p.symbol} on STOP...`);
@@ -1273,7 +1256,7 @@ export async function stopPaperTrading() {
 export async function emergencyCloseAll() {
   console.error(`[EMERGENCY_KILL_SWITCH] Activating panic close for ALL live positions due to fatal desync!`);
   
-  if (exchange && process.env.LIVE_TRADING_ENABLED === 'true') {
+  if (exchange && ordersEnabled()) {
       try {
            if (exchange.client && exchange.client.cancelAllOrders) {
                 await ccxtWithRetry(() => exchange.client.cancelAllOrders());
@@ -1340,7 +1323,7 @@ export async function resetPaperTrading() {
 
   if (state.openPositions && state.openPositions.length > 0) {
     for (const p of state.openPositions) {
-        if (process.env.LIVE_TRADING_ENABLED === 'true' && exchange) {
+        if (ordersEnabled() && exchange) {
              const side = p.direction === 'LONG' ? 'sell' : 'buy';
              try {
                  console.log(`[LIVE EXECUTION] Sending ${side} exit order for ${p.symbol} on RESET...`);
@@ -1353,7 +1336,7 @@ export async function resetPaperTrading() {
   }
   
   let startingCapital = 10000.00;
-  if (exchange) {
+  if (exchange && ordersEnabled()) {
       try {
           const realMargin = await exchange.fetchMarginBalance();
           if (realMargin !== null) {
@@ -1375,7 +1358,6 @@ export async function resetPaperTrading() {
     regimes: {},
     lastUpdate: new Date().toISOString(),
     startTime: new Date().toISOString(),
-    botSecret: BOT_SECRET,
     equityHistory: [],
     metricsHistory: [],
     maxHistoricalEquity: startingCapital,
@@ -1586,7 +1568,7 @@ export async function loopTick() {
         // Execute Partial Take Profit (Harvest) detected by size drop
         if (p.size < oldSize && !wasHarvested && (p as any).isHarvestExecuted) {
              const diff = oldSize - p.size;
-             if (process.env.LIVE_TRADING_ENABLED === 'true') {
+             if (ordersEnabled()) {
                  try {
                      const side = p.direction === 'LONG' ? 'sell' : 'buy';
                      console.log(`[HARVEST] Executing partial close for ${p.symbol} dropping ${diff} contracts...`);
@@ -1604,7 +1586,7 @@ export async function loopTick() {
         }
 
         // If the Stop Loss has trailed, update native SL on Kraken!
-        if (!exitDecision.shouldExit && oldStopLoss !== p.currentStopLoss && process.env.LIVE_TRADING_ENABLED === 'true') {
+        if (!exitDecision.shouldExit && oldStopLoss !== p.currentStopLoss && ordersEnabled()) {
              try {
                  const side = p.direction === 'LONG' ? 'sell' : 'buy';
                  const orderResp: any = await ccxtWithRetry(() => exchange.updateStopLossOrder(p.symbol, side, p.size, p.currentStopLoss, (p as any).brokerStopLossOrderId));
@@ -1621,7 +1603,7 @@ export async function loopTick() {
             console.log(`[EXIT LAYER] Closing ${p.symbol} ${p.direction} at $${livePrice}. Reason: ${exitDecision.exitType}`);
             
             let isLiveExitSuccess = true;
-            if (process.env.LIVE_TRADING_ENABLED === 'true') {
+            if (ordersEnabled()) {
                  // If it's natively closed by broker we don't need to close again
                  if (exitDecision.exitType === "NATIVE_STOP_LOSS_HIT") {
                      isLiveExitSuccess = true;
@@ -1726,9 +1708,9 @@ export async function loopTick() {
     let newBalance = (state.baseBalance || 10000.00) + totalPnl;
     if (isNaN(newBalance) || !isFinite(newBalance)) newBalance = state.baseBalance || 10000.00;
     
-    // SYNC LAYER (Virtual vs Kraken Live / Sandbox)
+    // SYNC LAYER (Virtual vs Kraken Live / Sandbox) — solo con ordini abilitati (demo/live)
     let effectiveRiskBalance = newBalance;
-    if (exchange) {
+    if (exchange && ordersEnabled()) {
         try {
             const realMargin = await exchange.fetchMarginBalance();
             if (realMargin !== null) {
@@ -1837,7 +1819,7 @@ export async function loopTick() {
                                 const brokerOrderId = (localP as any).brokerStopLossOrderId;
                                 const slExists = openOrders.openOrders.some((o: any) => o.order_id === brokerOrderId);
                                 
-                                if (!slExists && localP.size > 0 && process.env.LIVE_TRADING_ENABLED === 'true') {
+                                if (!slExists && localP.size > 0 && ordersEnabled()) {
                                     console.warn(`[NATIVE_SL_HEAL] Missing Stop Loss for active position ${localP.symbol}. Generating emergency SL!`);
                                     try {
                                         const side = localP.direction === 'LONG' ? 'sell' : 'buy';
@@ -2052,7 +2034,7 @@ export async function loopTick() {
                           const clientOrderId = `entry_${positionId.substring(4)}`;
                           
                           // P3/P5: Isolated Margin & Leverage Preference before Entry
-                          if (process.env.LIVE_TRADING_ENABLED === 'true') {
+                          if (ordersEnabled()) {
                               const leverageOk = await exchange.ensureIsolatedLeverage(symbol, risk.leverage || 2);
                               if (!leverageOk) {
                                   console.error(`[ENTRY_BLOCKED_MARGIN_MODE_UNSAFE] Could not confirm isolated margin for ${symbol}`);
@@ -2090,7 +2072,7 @@ export async function loopTick() {
                           let isLiveExecutionSuccess = true;
                           let finalFilledSize = 0;
 
-                          if (process.env.LIVE_TRADING_ENABLED === 'true') {
+                          if (ordersEnabled()) {
                               // P3: Protected Limit Entry
                               const side = signal.direction === 'LONG' ? 'buy' : 'sell';
                               const entryRes = await createProtectedLimitEntryOrder({
@@ -2149,7 +2131,7 @@ export async function loopTick() {
                                   engine: signal.engine
                               };
                               
-                              if (process.env.LIVE_TRADING_ENABLED === 'true' && state.positionLedger[positionId]) {
+                              if (ordersEnabled() && state.positionLedger[positionId]) {
                                   (newPos as any).brokerStopLossOrderId = state.positionLedger[positionId].nativeStopLossOrderId;
                                   (newPos as any).clientOrderId = clientOrderId;
                               }
