@@ -10,7 +10,8 @@ const PATTERNS: [string, RegExp][] = [
   ['chiave AWS', /\bAKIA[0-9A-Z]{16}\b/],
   ['chiave privata', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
   ['token bot Telegram', /\b\d{8,10}:[A-Za-z0-9_-]{35}\b/],
-  ['vecchio segreto Firestore', /arbiter-secret-key/],
+  // Costruito a pezzi: scritto per esteso questo file troverebbe se stesso.
+  ['vecchio segreto Firestore', new RegExp(['arbiter', 'secret', 'key'].join('-'))],
   ['segreto assegnato in chiaro', /(api[_-]?key|api[_-]?secret|secret[_-]?key|password)\s*[:=]\s*["'][A-Za-z0-9+/=_-]{20,}["']/i],
 ];
 
