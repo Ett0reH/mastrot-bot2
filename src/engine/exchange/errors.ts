@@ -19,6 +19,7 @@ export type KrakenErrorKind =
   | 'auth' // credenziali o nonce: rifiutata prima dell'elaborazione
   | 'rejected' // altri 4xx o errori applicativi noti: rifiutata
   | 'circuit_open' // non inviata: circuit breaker aperto
+  | 'blocked' // non inviata: scrittura non consentita (lease non detenuto)
   | 'unknown';
 
 export class KrakenCallError extends Error {

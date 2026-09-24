@@ -57,6 +57,10 @@ export interface EngineConfig {
   firebase: {
     serviceAccountJson: string | null;
   };
+  persistence: {
+    /** Scritture giornaliere massime su Firestore (oltre, si sospendono journal ed equity). */
+    dailyWriteBudget: number;
+  };
 }
 
 /** Limiti di default (sezione 2 del prompt). In live vanno impostati esplicitamente. */
@@ -226,6 +230,9 @@ export function loadConfig(env: Env): { config: EngineConfig; warnings: string[]
     alerts: { channel, telegram, webhookUrl },
     auth: { adminToken, cronToken },
     firebase: { serviceAccountJson: read(env, 'FIREBASE_SERVICE_ACCOUNT_JSON') ?? null },
+    persistence: {
+      dailyWriteBudget: parseNumber(env, 'FIRESTORE_DAILY_WRITE_BUDGET', 3_000, problems, (n) => Number.isInteger(n) && n >= 200, 'deve essere un intero ≥ 200'),
+    },
   };
   if (problems.length > 0) throw new ConfigError(problems);
   return { config, warnings };

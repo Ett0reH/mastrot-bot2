@@ -2,7 +2,8 @@
 // @siebly/kraken-api, con le stesse firme (il client reale lo soddisfa senza adattatori).
 // Documentazione di riferimento, citata da siebly: https://docs.kraken.com/api/docs/guides/futures-rest
 // Endpoint (DerivativesClient.js): sendorder, editorder, cancelorder, cancelallorders, openorders,
-// orders/status, openpositions, fills, accounts, leveragepreferences, transfer, instruments, tickers.
+// orders/status, openpositions, fills, accounts, leveragepreferences, transfer, instruments, tickers,
+// api/history/v3/account-log.
 import { DerivativesClient } from '@siebly/kraken-api';
 import type { EngineConfig } from '../config/config';
 import { krakenClientOptions } from '../config/runtime';
@@ -23,6 +24,7 @@ export type KrakenFuturesApi = Pick<
   | 'getLeverageSettings'
   | 'setLeverageSettings'
   | 'submitWalletTransfer'
+  | 'getAccountLog'
 >;
 
 /**

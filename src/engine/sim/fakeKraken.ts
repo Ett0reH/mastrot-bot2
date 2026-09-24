@@ -12,7 +12,9 @@
 // errori di rete, e il caso critico "timeout dopo l'elaborazione" (l'ordine esiste su Kraken
 // ma il client riceve un timeout).
 import type {
+  FuturesAccountLogEntry,
   FuturesCancelOrderParams,
+  FuturesGetAccountLogParams,
   FuturesEditOrderParams,
   FuturesFill,
   FuturesInitiateWalletTransferParams,
@@ -107,6 +109,9 @@ export class FakeKrakenFutures implements KrakenFuturesApi {
   /** Simboli per cui setLeverageSettings viene accettato ma non applicato (per D20). */
   readonly ignoreLeverageFor = new Set<string>();
   readonly transfers: FuturesInitiateWalletTransferParams[] = [];
+  readonly accountLogEntries: FuturesAccountLogEntry[] = [];
+  /** Chiamato dopo che una richiesta è stata elaborata (prima della risposta al client). */
+  onProcessed: ((method: Method, params: unknown) => void) | null = null;
   private readonly faults = new Map<Method, { fault: Fault; when?: (params: unknown) => boolean }[]>();
   private seq = 0;
   instruments: FuturesInstrument[];
@@ -151,6 +156,7 @@ export class FakeKrakenFutures implements KrakenFuturesApi {
       return { result: 'success', serverTime: iso(this.now()), sendStatus: { status: fault.status, cliOrdId: p.cliOrdId, receivedTime: iso(this.now()), orderEvents: [] } } as T;
     }
     const value = process();
+    this.onProcessed?.(method, params);
     if (fault?.kind === 'timeout_after_processing') throw Object.assign(new Error('timeout of 10000ms exceeded'), { code: 'ECONNABORTED' });
     return value;
   }
@@ -265,7 +271,27 @@ export class FakeKrakenFutures implements KrakenFuturesApi {
       symbol: order.symbol,
     };
     this.fills.push(fill);
+    this.logEntry({ info: 'futures trade', contract: order.symbol.toLowerCase(), execution: fill.fill_id, fee: size * price * 0.0005, trade_price: price });
     return fill;
+  }
+
+  /** Deposito (importo > 0) o prelievo (< 0) sul conto, fatto fuori dal bot. */
+  externalTransfer(amount: number): FuturesAccountLogEntry {
+    return this.logEntry({ info: amount > 0 ? 'cross-account transfer in' : 'cross-account transfer out' }, amount);
+  }
+
+  /** Voce dell'account log (forma: FuturesAccountLogEntry). */
+  logEntry(p: Partial<FuturesAccountLogEntry> & { info: string }, extraBalanceChange = 0): FuturesAccountLogEntry {
+    const prev = this.accountLogEntries.at(-1)?.new_balance ?? 10_000;
+    const delta = (p.realized_pnl ?? 0) + (p.realized_funding ?? 0) - (p.fee ?? 0) + extraBalanceChange;
+    const entry: FuturesAccountLogEntry = {
+      asset: 'usd', booking_uid: `bk-${++this.seq}`, collateral: null, contract: null, date: iso(this.now()), execution: null, fee: null,
+      funding_rate: null, id: this.accountLogEntries.length + 1, margin_account: 'flex', mark_price: null, new_average_entry_price: null,
+      new_balance: prev + delta, old_average_entry_price: null, old_balance: prev, realized_funding: null, realized_pnl: null, trade_price: null,
+      ...p,
+    };
+    this.accountLogEntries.push(entry);
+    return entry;
   }
 
   /** Esecuzione a mercato limitata dalla liquidità (e dal limite, se presente). */
@@ -536,6 +562,14 @@ export class FakeKrakenFutures implements KrakenFuturesApi {
         else this.leverage.set(params.symbol, params.maxLeverage);
       }
       return this.ok({} as Record<string, never>);
+    });
+  }
+
+  getAccountLog(params?: FuturesGetAccountLogParams) {
+    return this.call('getAccountLog', params, () => {
+      const from = params?.from ?? 1;
+      const logs = this.accountLogEntries.filter((e) => e.id >= from).slice(0, params?.count ?? 500);
+      return { result: 'success' as const, serverTime: iso(this.now()), accountUid: 'fake-account', logs: structuredClone(logs) };
     });
   }
 

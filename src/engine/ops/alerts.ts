@@ -19,7 +19,8 @@ export type AlertCode =
   | 'KILL_SWITCH'
   | 'HEARTBEAT_MISSING'
   | 'RISK_REJECTED'
-  | 'MODE_CHANGE';
+  | 'MODE_CHANGE'
+  | 'ACCOUNT_TRANSFER';
 
 export interface Alert {
   level: AlertLevel;
@@ -42,6 +43,15 @@ export class MemoryAlertSink implements AlertSink {
 
   codes(): AlertCode[] {
     return this.alerts.map((a) => a.code);
+  }
+}
+
+/** Alert sul log strutturato (JSON su stdout), finché i canali della F6 non sono attivi. */
+export class LogAlertSink implements AlertSink {
+  constructor(private readonly write: (line: string) => void = (line) => console.log(line)) {}
+
+  async send(alert: Alert): Promise<void> {
+    this.write(JSON.stringify({ type: 'alert', ...alert }));
   }
 }
 

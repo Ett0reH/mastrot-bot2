@@ -28,6 +28,8 @@ export const ENDPOINT_COSTS: Readonly<Record<string, number>> = {
   leveragepreferences: 2,
   'leveragepreferences:set': 10,
   transfer: 10,
+  // Le API di storico hanno un budget separato su Kraken: si leggono di rado (ogni 10 minuti).
+  accountlog: 10,
   instruments: 0,
   tickers: 0,
 };

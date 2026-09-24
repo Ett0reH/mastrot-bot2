@@ -8,6 +8,7 @@
 //   ordine (D18).
 // - Le operazioni di protezione (stop, chiusure d'emergenza) passano anche col circuito aperto.
 import type {
+  FuturesAccountLogEntry,
   FuturesAccounts,
   FuturesCancelAllOrdersStatus,
   FuturesCancelOrderParams,
@@ -45,6 +46,11 @@ export interface AdapterOptions {
   readAttempts?: number;
   rateLimit?: RateLimitConfig;
   circuitBreaker?: CircuitBreakerConfig;
+  /**
+   * Controllo prima di ogni SCRITTURA (ordini, modifiche, leva, trasferimenti): null se
+   * consentita, altrimenti il motivo. Il runtime lo collega al lease d'istanza (I11).
+   */
+  canWrite?: () => string | null;
   log?: (event: { level: 'info' | 'warn' | 'error'; message: string; context?: Record<string, unknown> }) => void;
 }
 
@@ -114,6 +120,11 @@ export class KrakenAdapter {
   }
 
   private async write<T>(endpoint: string, call: () => Promise<T>, priority: Priority): Promise<WriteResult<T>> {
+    const blocked = this.options.canWrite?.() ?? null;
+    if (blocked !== null) {
+      this.log('error', `Kraken ${endpoint} non inviato: ${blocked}`);
+      return { outcome: 'failed', error: new KrakenCallError('blocked', `Kraken: ${endpoint} non inviato (${blocked})`) };
+    }
     try {
       return { outcome: 'ok', value: await this.once(endpoint, call, priority) };
     } catch (err) {
@@ -150,6 +161,11 @@ export class KrakenAdapter {
 
   async accounts(): Promise<FuturesAccounts> {
     return (await this.read('accounts', () => this.api.getAccounts())).accounts;
+  }
+
+  /** Voci dell'account log con id ≥ `fromId`, in ordine crescente. */
+  async accountLog(fromId: number, count = 500): Promise<FuturesAccountLogEntry[]> {
+    return (await this.read('accountlog', () => this.api.getAccountLog({ from: fromId, sort: 'asc', count }))).logs;
   }
 
   async leverageSettings(): Promise<FuturesLeveragePreference[]> {
